@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+
 import '../providers/chat_provider.dart';
 import '../theme/app_theme.dart';
+import '../utils/clipboard_utils.dart';
 
 /// SQLite Database Explorer Dialog
 ///
@@ -84,6 +86,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
     try {
       final apiService = context.read<ChatProvider>().apiService;
       final overview = await apiService.getDatabaseOverview();
+      if (!mounted) return;
 
       if (overview['status'] == 'offline') {
         setState(() {
@@ -115,6 +118,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
         await _loadTableData(initialTable);
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isLoadingOverview = false;
         _overviewError = 'Failed to load database overview: $e';
@@ -134,6 +138,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
     try {
       final apiService = context.read<ChatProvider>().apiService;
       final data = await apiService.getDatabaseTableData(tableName, limit: 300);
+      if (!mounted) return;
 
       if (data['status'] == 'error') {
         setState(() {
@@ -155,6 +160,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
             .toList();
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isLoadingTableData = false;
         _tableDataError = 'Error fetching rows: $e';
@@ -177,6 +183,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
       final apiService = context.read<ChatProvider>().apiService;
       final result = await apiService.executeDatabaseQuery(query);
       stopwatch.stop();
+      if (!mounted) return;
 
       if (result['status'] == 'error') {
         setState(() {
@@ -202,6 +209,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
       });
     } catch (e) {
       stopwatch.stop();
+      if (!mounted) return;
       setState(() {
         _isExecutingQuery = false;
         _queryError = 'Execution failed: $e';
@@ -213,14 +221,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
   }
 
   void _copyToClipboard(String text, String label) {
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('$label copied to clipboard'),
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    copyWithFeedback(context, text, label: '$label copied to clipboard');
   }
 
   void _showRecordDetailsDialog(Map<String, dynamic> row) {
@@ -1374,14 +1375,14 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: isOk
-            ? const Color(0xFF2DA44E).withValues(alpha: 0.12)
+            ? theme.statusOk.withValues(alpha: 0.12)
             : theme.isDark
             ? const Color(0xFF21262D)
             : const Color(0xFFEAEEF2),
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
           color: isOk
-              ? const Color(0xFF2DA44E).withValues(alpha: 0.35)
+              ? theme.statusOk.withValues(alpha: 0.35)
               : theme.borderDefault,
           width: 0.8,
         ),
@@ -1394,7 +1395,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
             height: 5,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isOk ? const Color(0xFF2DA44E) : theme.fgMuted,
+              color: isOk ? theme.statusOk : theme.fgMuted,
             ),
           ),
           const SizedBox(width: 4),
@@ -1403,11 +1404,7 @@ class _DatabaseExplorerDialogState extends State<DatabaseExplorerDialog> {
             style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w600,
-              color: isOk
-                  ? (theme.isDark
-                        ? const Color(0xFF7EE787)
-                        : const Color(0xFF1A7F37))
-                  : theme.fgMuted,
+              color: isOk ? theme.successText : theme.fgMuted,
             ),
           ),
         ],

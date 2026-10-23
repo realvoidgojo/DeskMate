@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
+import '../core/constants.dart';
 import '../providers/chat_provider.dart';
+import '../utils/clipboard_utils.dart';
 import '../theme/app_theme.dart';
 import 'database_explorer_dialog.dart';
 
@@ -8,11 +11,13 @@ class Sidebar extends StatefulWidget {
   final VoidCallback? onOpenSettings;
   final void Function([AgentMode? mode])? onOpenSetupGuide;
   final VoidCallback? onOpenDatabaseExplorer;
+  final void Function(String message)? onShowTopNotification;
   const Sidebar({
     super.key,
     this.onOpenSettings,
     this.onOpenSetupGuide,
     this.onOpenDatabaseExplorer,
+    this.onShowTopNotification,
   });
 
   @override
@@ -136,15 +141,21 @@ class _SidebarState extends State<Sidebar> {
                             // --- STATUS CARD ---
                             _buildStatusCard(provider, theme),
 
-                            if (provider.mode == AgentMode.personal) ...[
+                            if (provider.mode == AgentMode.deskMate) ...[
+                              const SizedBox(height: 12),
+                              _buildFileAgentHealthCard(provider, theme),
+                            ] else if (provider.mode == AgentMode.personal) ...[
                               const SizedBox(height: 12),
                               _buildPersonalHealthCard(provider, theme),
+                            ] else if (provider.mode == AgentMode.meeting) ...[
+                              const SizedBox(height: 12),
+                              _buildMeetingHealthCard(provider, theme),
                             ],
 
                             const SizedBox(height: 12),
 
                             // --- AGENT GUIDES & DOCUMENTATION ---
-                            _buildAgentGuidesSection(theme),
+                            _buildAgentGuidesSection(provider, theme),
 
                             const Spacer(),
 
@@ -161,7 +172,7 @@ class _SidebarState extends State<Sidebar> {
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Text(
-                                    'DeskMate AI • v1.0.0',
+                                    '${AppConstants.appName} • v${AppConstants.version}',
                                     style: TextStyle(
                                       fontSize: 10,
                                       fontWeight: FontWeight.w600,
@@ -254,6 +265,14 @@ class _SidebarState extends State<Sidebar> {
             isSelected: provider.mode == AgentMode.personal,
             onTap: () => provider.switchMode(AgentMode.personal),
           ),
+          const SizedBox(height: 4),
+          _buildModeItem(
+            theme: theme,
+            title: 'Meeting Scribe',
+            icon: Icons.mic_rounded,
+            isSelected: provider.mode == AgentMode.meeting,
+            onTap: () => provider.switchMode(AgentMode.meeting),
+          ),
         ],
       ),
     );
@@ -308,10 +327,13 @@ class _SidebarState extends State<Sidebar> {
 
   Widget _buildStatusCard(ChatProvider provider, ThemeData theme) {
     final isOnline = provider.isBackendOnline;
+    final backendColor = isOnline
+        ? theme.successFg
+        : (provider.isConnecting ? theme.attentionFg : theme.dangerFg);
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: theme.isDark ? theme.bgCanvas : theme.bgCanvas,
+        color: theme.bgCanvas,
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: theme.borderDefault, width: 1),
       ),
@@ -338,25 +360,23 @@ class _SidebarState extends State<Sidebar> {
                   height: 22,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    color: (isOnline ? theme.successFg : theme.dangerFg)
-                        .withValues(alpha: 0.12),
+                    color: backendColor.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                      color: (isOnline ? theme.successFg : theme.dangerFg)
-                          .withValues(alpha: 0.35),
+                      color: backendColor.withValues(alpha: 0.35),
                       width: 0.8,
                     ),
                   ),
-                  child: Icon(
-                    Icons.dns_rounded,
-                    size: 13,
-                    color: isOnline ? theme.successFg : theme.dangerFg,
-                  ),
+                  child: Icon(Icons.dns_rounded, size: 13, color: backendColor),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    isOnline ? 'Backend Online' : 'Backend Offline',
+                    isOnline
+                        ? 'Backend: Online'
+                        : (provider.isConnecting
+                              ? 'Backend: Starting...'
+                              : 'Backend: Offline'),
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -369,28 +389,37 @@ class _SidebarState extends State<Sidebar> {
           ),
           const SizedBox(height: 2),
 
-          // Processor / Chip Icon for Local LLM or Cloud Icon for Gemini (Clickable to open Model Configuration)
+          // 1. Reasoning Model Row (Local Chat LLM or Gemini)
           Builder(
             builder: (context) {
               final isGemini = provider.isUsingGemini;
               final isLlmOnline = provider.isLocalLlmOnline;
-              final Color llmColor = isGemini
-                  ? theme.accentFg
-                  : (isLlmOnline ? theme.successFg : theme.dangerFg);
-              final IconData llmIcon = isGemini
-                  ? Icons.cloud_done_rounded
-                  : Icons.memory_rounded; // Microchip / Processor icon
+              final hasSelectedLocal = provider.selectedLocalModel.isNotEmpty;
+              final isUsingLocalReasoning = isLlmOnline && hasSelectedLocal;
 
-              final modelText = isGemini
-                  ? 'Gemini (Flash) Active'
-                  : (isLlmOnline
-                        ? (provider.selectedLocalModel.isNotEmpty
-                              ? 'Local: ${provider.selectedLocalModel}'
-                              : 'Local LLM Active')
-                        : 'Local LLM Offline');
+              final Color llmColor = isUsingLocalReasoning
+                  ? theme.successFg
+                  : (isGemini
+                        ? theme.accentFg
+                        : (isLlmOnline ? theme.successFg : theme.dangerFg));
+              final IconData llmIcon = isUsingLocalReasoning
+                  ? Icons.memory_rounded
+                  : (isGemini
+                        ? Icons.cloud_done_rounded
+                        : Icons.memory_rounded);
+
+              final reasoningText = isUsingLocalReasoning
+                  ? 'Reasoning: ${provider.selectedLocalModel}'
+                  : (isGemini
+                        ? 'Reasoning: Gemini 2.5 Flash (Cloud)'
+                        : (isLlmOnline
+                              ? (provider.effectiveModel.isNotEmpty
+                                    ? 'Reasoning: ${provider.effectiveModel}'
+                                    : 'Reasoning: Local LLM')
+                              : 'Reasoning: Offline'));
 
               return Tooltip(
-                message: 'Click to configure AI model & Gemini key',
+                message: 'Click to configure AI reasoning chat model',
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
@@ -421,7 +450,7 @@ class _SidebarState extends State<Sidebar> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              modelText,
+                              reasoningText,
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
@@ -444,9 +473,930 @@ class _SidebarState extends State<Sidebar> {
               );
             },
           ),
+          // 2. Vision Model Row (Shown only in Meeting Scribe mode)
+          if (provider.mode == AgentMode.meeting) ...[
+            const SizedBox(height: 2),
+            Builder(
+              builder: (context) {
+                final isGemini = provider.isUsingGemini;
+                final hasVision = provider.hasVisionModel;
+                final isLightweight = provider.useLightweightVision;
+
+                final Color visionColor;
+                final IconData visionIcon;
+                final String visionModelText;
+
+                if (isGemini) {
+                  visionColor = theme.accentFg;
+                  visionIcon = Icons.cloud_done_rounded;
+                  visionModelText = 'Vision: Gemini 2.5 Flash (Cloud)';
+                } else if (isLightweight) {
+                  visionColor = AppTheme.teal;
+                  visionIcon = Icons.laptop_chromebook_rounded;
+                  visionModelText = 'Vision: Lightweight Mode';
+                } else if (hasVision) {
+                  visionColor = theme.successFg;
+                  visionIcon = Icons.visibility_rounded;
+                  final name = provider.visionModelName.isNotEmpty
+                      ? provider.visionModelName
+                      : 'llama3.2-vision';
+                  visionModelText = 'Vision: $name';
+                } else {
+                  // Only show red when no vision model, no lightweight mode, and no Gemini API
+                  visionColor = theme.dangerFg;
+                  visionIcon = Icons.visibility_off_rounded;
+                  visionModelText = 'Vision: Setup Required';
+                }
+
+                final String activeModel = provider.effectiveModel.isNotEmpty
+                    ? provider.effectiveModel
+                    : 'Chat LLM';
+                final String tooltipMessage = isGemini
+                    ? 'Gemini Multimodal Cloud Active — No local vision model required. Click to manage.'
+                    : (isLightweight
+                          ? 'Lightweight Laptop Mode: Screen OCR paired with $activeModel. Zero vision model download needed.'
+                          : (hasVision
+                                ? 'Llama Vision active in Ollama. Click to view settings.'
+                                : 'Vision Setup Required: Pull llama3.2-vision, enable Lightweight Mode, or configure Gemini.'));
+
+                return Tooltip(
+                  message: tooltipMessage,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      mouseCursor: SystemMouseCursors.click,
+                      onTap: () {
+                        _showVisionHelperDialog(context, theme, provider);
+                      },
+                      borderRadius: BorderRadius.circular(5),
+                      hoverColor: visionColor.withValues(alpha: 0.08),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 22,
+                              height: 22,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: visionColor.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color: visionColor.withValues(alpha: 0.35),
+                                  width: 0.8,
+                                ),
+                              ),
+                              child: Icon(
+                                visionIcon,
+                                size: 13,
+                                color: visionColor,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                visionModelText,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: theme.fgDefault,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.tune_rounded,
+                              size: 13,
+                              color: theme.fgMuted.withValues(alpha: 0.7),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  void _showVisionHelperDialog(
+    BuildContext context,
+    ThemeData theme,
+    ChatProvider provider,
+  ) {
+    final geminiInputController = TextEditingController(
+      text: provider.geminiApiKey,
+    );
+    bool showGeminiInput = false;
+    bool obscureGemini = true;
+    bool isRechecking = false;
+
+    showBlurredDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final isOllamaOnline = provider.isLocalLlmOnline;
+          final isLightweight = provider.useLightweightVision;
+          final hasVision = provider.hasVisionModel;
+          final isGemini = provider.isUsingGemini;
+          final isReady = provider.isVisionActive;
+
+          final Color badgeColor = isReady
+              ? (isLightweight ? AppTheme.teal : theme.successFg)
+              : (!isOllamaOnline && !isGemini
+                    ? theme.dangerFg
+                    : theme.attentionFg);
+
+          return AlertDialog(
+            backgroundColor: theme.bgSubtle,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: theme.borderDefault),
+            ),
+            titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+            contentPadding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    isReady
+                        ? (isLightweight
+                              ? Icons.laptop_chromebook_rounded
+                              : Icons.visibility_rounded)
+                        : Icons.visibility_off_rounded,
+                    color: badgeColor,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Visual Intelligence Options',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: theme.fgDefault,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Choose how DeskMate processes slides & screen content',
+                        style: TextStyle(fontSize: 11.5, color: theme.fgMuted),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Status summary banner (dynamically updates when re-checked or switched)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: badgeColor.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: badgeColor.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isReady
+                                ? Icons.check_circle_rounded
+                                : Icons.info_outline_rounded,
+                            size: 15,
+                            color: badgeColor,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              isGemini
+                                  ? 'Active: Using Google Gemini Cloud Vision'
+                                  : (isLightweight
+                                        ? 'Active: Using Lightweight Laptop Mode (Screen OCR)'
+                                        : (hasVision
+                                              ? 'Active: Using Ollama Vision (${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"})'
+                                              : 'Action Required: Choose an option below to enable recording')),
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: badgeColor,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Option 1: Lightweight Laptop Mode (Ideal for low-spec laptops)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: isLightweight
+                            ? AppTheme.teal.withValues(alpha: 0.08)
+                            : theme.bgCanvas,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isLightweight
+                              ? AppTheme.teal.withValues(alpha: 0.5)
+                              : theme.borderDefault,
+                          width: isLightweight ? 1.5 : 1.0,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.laptop_chromebook_rounded,
+                                size: 18,
+                                color: AppTheme.teal,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Lightweight Laptop Mode',
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: theme.fgDefault,
+                                  ),
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isLightweight
+                                      ? theme.successFg.withValues(alpha: 0.12)
+                                      : (theme.isDark
+                                            ? const Color(
+                                                0xFF7C2D12,
+                                              ).withValues(alpha: 0.28)
+                                            : const Color(0xFFFFF7ED)),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: isLightweight
+                                        ? theme.successFg.withValues(alpha: 0.3)
+                                        : (theme.isDark
+                                              ? const Color(
+                                                  0xFF9A3412,
+                                                ).withValues(alpha: 0.55)
+                                              : const Color(0xFFFED7AA)),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: Text(
+                                  isLightweight
+                                      ? '✓ CURRENTLY IN USE'
+                                      : 'Small Laptop / 8-16GB RAM',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: isLightweight
+                                        ? AppTheme.teal
+                                        : (theme.isDark
+                                              ? const Color(0xFFFDBA74)
+                                              : const Color(0xFFC2410C)),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Does not require downloading multi-gigabyte vision weights! Uses your active local chat model (${provider.effectiveModel.isNotEmpty ? provider.effectiveModel : 'Ollama chat model'}) with screen OCR and Voxtral speech diarization to generate complete meeting minutes and action items.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: theme.fgMuted,
+                              height: 1.4,
+                            ),
+                          ),
+                          if (!isLightweight) ...[
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton.icon(
+                                icon: const Icon(Icons.bolt_rounded, size: 16),
+                                label: const Text(
+                                  'Switch to Lightweight Laptop Mode',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppTheme.teal,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                ),
+                                onPressed: () async {
+                                  await provider.setUseLightweightVision(true);
+                                  if (!context.mounted) return;
+                                  setDialogState(() {});
+                                  widget.onShowTopNotification?.call(
+                                    'Active: Lightweight Laptop Mode enabled',
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Option 2: Pull Local Multimodal Vision Model
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: hasVision && !isLightweight && !isGemini
+                            ? theme.successFg.withValues(alpha: 0.08)
+                            : theme.bgCanvas,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: hasVision && !isLightweight && !isGemini
+                              ? theme.successFg.withValues(alpha: 0.5)
+                              : (hasVision
+                                    ? theme.successFg.withValues(alpha: 0.3)
+                                    : theme.borderDefault),
+                          width: (hasVision && !isLightweight && !isGemini)
+                              ? 1.5
+                              : 1.0,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.visibility_rounded,
+                                size: 18,
+                                color: !isOllamaOnline
+                                    ? theme.fgMuted
+                                    : (hasVision
+                                          ? theme.successFg
+                                          : theme.accentFg),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Full Vision: ${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"}',
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: !isOllamaOnline
+                                        ? theme.fgMuted
+                                        : theme.fgDefault,
+                                  ),
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color:
+                                      (!isOllamaOnline
+                                              ? theme.dangerFg
+                                              : (hasVision
+                                                    ? theme.successFg
+                                                    : theme.accentFg))
+                                          .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  !isOllamaOnline
+                                      ? 'Ollama Offline'
+                                      : (hasVision &&
+                                                !isLightweight &&
+                                                !isGemini
+                                            ? '✓ CURRENTLY IN USE'
+                                            : (hasVision
+                                                  ? '✓ INSTALLED IN OLLAMA'
+                                                  : 'High-End Laptops / 16GB+ RAM')),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: !isOllamaOnline
+                                        ? theme.dangerFg
+                                        : (hasVision
+                                              ? theme.successFg
+                                              : theme.accentFg),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            !isOllamaOnline
+                                ? 'Ollama is offline. Start the Ollama application in macOS to use llama3.2-vision.'
+                                : (hasVision
+                                      ? '${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"} is installed in Ollama for 100% offline pixel-by-pixel screen analysis.'
+                                      : 'Inspects raw screenshots pixel-by-pixel. Pull and run this model in Ollama via your Mac terminal:'),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: theme.fgMuted,
+                              height: 1.4,
+                            ),
+                          ),
+                          if (hasVision) ...[
+                            if (isLightweight || isGemini) ...[
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  icon: const Icon(
+                                    Icons.check_circle_outline_rounded,
+                                    size: 16,
+                                  ),
+                                  label: Text(
+                                    'Select ${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"} as Active Mode',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: theme.successFg,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
+                                    ),
+                                  ),
+                                  onPressed: () async {
+                                    await provider.setUseLightweightVision(
+                                      false,
+                                    );
+                                    if (!context.mounted) return;
+                                    setDialogState(() {});
+                                    widget.onShowTopNotification?.call(
+                                      'Active: Full Vision Mode (${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"})',
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ] else ...[
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: theme.bgSubtle,
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: theme.borderDefault),
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: SelectableText(
+                                      'ollama run llama3.2-vision',
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: theme.accentFg,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.copy_rounded,
+                                      size: 16,
+                                    ),
+                                    tooltip: 'Copy Command',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () {
+                                      copyWithFeedback(
+                                        context,
+                                        'ollama run llama3.2-vision',
+                                        label: 'Command copied',
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Option 3: Gemini Cloud Vision (with tune icon and API key setup)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: isGemini
+                            ? theme.successFg.withValues(alpha: 0.08)
+                            : theme.bgCanvas,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isGemini
+                              ? theme.successFg.withValues(alpha: 0.5)
+                              : theme.borderDefault,
+                          width: isGemini ? 1.5 : 1.0,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.cloud_done_rounded,
+                                size: 18,
+                                color: isGemini
+                                    ? theme.successFg
+                                    : theme.accentFg,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Google Gemini Cloud Vision',
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: theme.fgDefault,
+                                  ),
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isGemini
+                                      ? theme.successFg.withValues(alpha: 0.12)
+                                      : (theme.isDark
+                                            ? const Color(
+                                                0xFF581C87,
+                                              ).withValues(alpha: 0.28)
+                                            : const Color(0xFFF3E8FF)),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: isGemini
+                                        ? theme.successFg.withValues(alpha: 0.3)
+                                        : (theme.isDark
+                                              ? const Color(
+                                                  0xFF7E22CE,
+                                                ).withValues(alpha: 0.55)
+                                              : const Color(0xFFE9D5FF)),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: Text(
+                                  isGemini
+                                      ? '✓ CURRENTLY IN USE'
+                                      : 'Zero RAM / Cloud',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: isGemini
+                                        ? theme.successFg
+                                        : (theme.isDark
+                                              ? const Color(0xFFD8B4FE)
+                                              : const Color(0xFF7E22CE)),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Zero local RAM used. Multimodal vision is processed natively via Gemini 2.5 Flash in Google Cloud.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: theme.fgMuted,
+                              height: 1.4,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          if (showGeminiInput) ...[
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: theme.bgSubtle,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: theme.borderDefault),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.tune_rounded, size: 14),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        'Google Gemini API Key',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: theme.fgDefault,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  TextField(
+                                    controller: geminiInputController,
+                                    obscureText: obscureGemini,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontFamily: 'monospace',
+                                    ),
+                                    decoration: InputDecoration(
+                                      hintText: 'Enter API Key (AIzaSy...)',
+                                      hintStyle: TextStyle(
+                                        fontSize: 12,
+                                        color: theme.fgMuted,
+                                      ),
+                                      isDense: true,
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(6),
+                                        borderSide: BorderSide(
+                                          color: theme.borderDefault,
+                                        ),
+                                      ),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                            horizontal: 10,
+                                            vertical: 8,
+                                          ),
+                                      suffixIcon: IconButton(
+                                        icon: Icon(
+                                          obscureGemini
+                                              ? Icons.visibility_rounded
+                                              : Icons.visibility_off_rounded,
+                                          size: 16,
+                                        ),
+                                        onPressed: () {
+                                          setDialogState(
+                                            () =>
+                                                obscureGemini = !obscureGemini,
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      TextButton(
+                                        onPressed: () {
+                                          setDialogState(
+                                            () => showGeminiInput = false,
+                                          );
+                                        },
+                                        child: Text(
+                                          'Cancel',
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            color: theme.fgMuted,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      ElevatedButton.icon(
+                                        icon: const Icon(
+                                          Icons.check_rounded,
+                                          size: 14,
+                                        ),
+                                        label: const Text(
+                                          'Save & Activate',
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: theme.accentFg,
+                                          foregroundColor: Colors.white,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 10,
+                                            vertical: 6,
+                                          ),
+                                        ),
+                                        onPressed: () async {
+                                          final key = geminiInputController.text
+                                              .trim();
+                                          if (key.isNotEmpty) {
+                                            await provider.saveAiConfiguration(
+                                              model: AppConstants.geminiModelId,
+                                              geminiApiKey: key,
+                                            );
+                                            if (!context.mounted) return;
+                                            setDialogState(() {
+                                              showGeminiInput = false;
+                                            });
+                                            widget.onShowTopNotification?.call(
+                                              'Active: Google Gemini Cloud Vision activated',
+                                            );
+                                          }
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ] else ...[
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: ElevatedButton.icon(
+                                    icon: const Icon(
+                                      Icons.tune_rounded,
+                                      size: 15,
+                                    ),
+                                    label: Text(
+                                      isGemini
+                                          ? 'Configure / Edit Gemini API Key'
+                                          : 'Setup Gemini API Key',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: isGemini
+                                          ? theme.bgSubtle
+                                          : theme.accentFg,
+                                      foregroundColor: isGemini
+                                          ? theme.fgDefault
+                                          : Colors.white,
+                                      side: isGemini
+                                          ? BorderSide(
+                                              color: theme.borderDefault,
+                                            )
+                                          : BorderSide.none,
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 8,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                    ),
+                                    onPressed: () {
+                                      setDialogState(
+                                        () => showGeminiInput = true,
+                                      );
+                                    },
+                                  ),
+                                ),
+                                if (isGemini) ...[
+                                  const SizedBox(width: 8),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.delete_outline_rounded,
+                                      size: 16,
+                                    ),
+                                    tooltip: 'Remove Gemini Key',
+                                    onPressed: () async {
+                                      await provider.saveAiConfiguration(
+                                        model: provider.selectedModel,
+                                        geminiApiKey: '',
+                                      );
+                                      if (!context.mounted) return;
+                                      geminiInputController.text = '';
+                                      setDialogState(() {});
+                                      widget.onShowTopNotification?.call(
+                                        'Gemini API key removed',
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: Text('Close', style: TextStyle(color: theme.fgMuted)),
+              ),
+              ElevatedButton.icon(
+                onPressed: isRechecking
+                    ? null
+                    : () async {
+                        setDialogState(() {
+                          isRechecking = true;
+                        });
+                        try {
+                          await provider.refreshHealthStatus();
+                        } catch (e) {
+                          // ignore error
+                        } finally {
+                          final isOllamaOnline = provider.isLocalLlmOnline;
+                          final isLightweight = provider.useLightweightVision;
+                          final hasVision = provider.hasVisionModel;
+                          final isGemini = provider.isUsingGemini;
+                          final String statusText;
+                          if (isGemini) {
+                            statusText =
+                                'Active: Google Gemini 2.5 Flash Cloud Vision';
+                          } else if (!isOllamaOnline) {
+                            statusText =
+                                'Ollama is offline. Start Ollama to use vision.';
+                          } else if (isLightweight) {
+                            statusText =
+                                'Active: Lightweight Laptop Mode (Screen OCR)';
+                          } else if (hasVision) {
+                            statusText =
+                                'Active: Local Ollama Vision (${provider.visionModelName.isNotEmpty ? provider.visionModelName : "llama3.2-vision"})';
+                          } else {
+                            statusText =
+                                '${provider.availableLocalModels.length} models detected. Vision model setup needed.';
+                          }
+
+                          if (ctx.mounted) {
+                            setDialogState(() {
+                              isRechecking = false;
+                            });
+                          }
+                          widget.onShowTopNotification?.call(
+                            'Refreshed: $statusText',
+                          );
+                        }
+                      },
+                icon: isRechecking
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Colors.white,
+                          ),
+                        ),
+                      )
+                    : const Icon(Icons.refresh_rounded, size: 16),
+                label: Text(isRechecking ? 'Checking...' : 'Re-check Status'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: theme.accentFg,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    ).then((_) => geminiInputController.dispose());
   }
 
   Widget _buildNewChatButton(ChatProvider provider, ThemeData theme) {
@@ -484,7 +1434,7 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
-  Widget _buildAgentGuidesSection(ThemeData theme) {
+  Widget _buildAgentGuidesSection(ChatProvider provider, ThemeData theme) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -493,7 +1443,7 @@ class _SidebarState extends State<Sidebar> {
             Icon(Icons.menu_book_rounded, size: 12, color: theme.fgMuted),
             const SizedBox(width: 6),
             Text(
-              'AGENT GUIDES & DOCS',
+              'AGENT GUIDE & DOCS',
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: FontWeight.w700,
@@ -505,27 +1455,37 @@ class _SidebarState extends State<Sidebar> {
         ),
         const SizedBox(height: 8),
 
-        // File Explorer & Local LLM Guide
-        _buildSidebarGuideCard(
-          theme: theme,
-          icon: Icons.folder_open_rounded,
-          title: 'File Copilot & LLM Guide',
-          subtitle: 'Local models, RAG vector DB & Ollama',
-          badge: '100% Offline',
-          onTap: () => widget.onOpenSetupGuide?.call(AgentMode.deskMate),
-        ),
-
-        const SizedBox(height: 9),
-
-        // Personal Agent Setup Guide
-        _buildSidebarGuideCard(
-          theme: theme,
-          icon: Icons.person_rounded,
-          title: 'Personal Agent Guide',
-          subtitle: 'Google OAuth, Gmail, Calendar, Drive',
-          badge: 'Workspace',
-          onTap: () => widget.onOpenSetupGuide?.call(AgentMode.personal),
-        ),
+        if (provider.mode == AgentMode.deskMate) ...[
+          // File Explorer & Local LLM Guide
+          _buildSidebarGuideCard(
+            theme: theme,
+            icon: Icons.folder_open_rounded,
+            title: 'File Copilot & LLM Guide',
+            subtitle: 'Local models, RAG vector DB & Ollama',
+            badge: '100% Offline',
+            onTap: () => widget.onOpenSetupGuide?.call(AgentMode.deskMate),
+          ),
+        ] else if (provider.mode == AgentMode.personal) ...[
+          // Personal Agent Setup Guide
+          _buildSidebarGuideCard(
+            theme: theme,
+            icon: Icons.person_rounded,
+            title: 'Personal Agent Guide',
+            subtitle: 'Google OAuth, Gmail, Calendar, Drive',
+            badge: 'Workspace',
+            onTap: () => widget.onOpenSetupGuide?.call(AgentMode.personal),
+          ),
+        ] else if (provider.mode == AgentMode.meeting) ...[
+          // Meeting Scribe Setup Guide
+          _buildSidebarGuideCard(
+            theme: theme,
+            icon: Icons.mic_rounded,
+            title: 'Meeting Scribe Guide',
+            subtitle: 'Voxtral 4B, Drive PDF & Gmail Sync',
+            badge: 'Intelligence',
+            onTap: () => widget.onOpenSetupGuide?.call(AgentMode.meeting),
+          ),
+        ],
       ],
     );
   }
@@ -638,11 +1598,13 @@ class _SidebarState extends State<Sidebar> {
     );
   }
 
-  Widget _buildPersonalHealthCard(ChatProvider provider, ThemeData theme) {
-    final health = provider.personalAgentHealth;
-    final checks = health['checks'] as Map<String, dynamic>? ?? {};
-    final status = health['status'] as String? ?? 'loading';
-
+  Widget _buildHealthCard({
+    required ThemeData theme,
+    required String status,
+    required String title,
+    required String offlineLabel,
+    required List<Widget> rows,
+  }) {
     if (status == 'loading') {
       return Container(
         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -659,38 +1621,6 @@ class _SidebarState extends State<Sidebar> {
       );
     }
 
-    if (status == 'offline') {
-      return Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: theme.dangerBg,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: theme.dangerBorder, width: 1),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.error_outline_rounded, color: theme.dangerFg, size: 14),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                'Personal Agent offline',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: theme.dangerFg,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final hasCredsFile = checks['google_credentials_file'] ?? false;
-    final hasGmailToken = checks['gmail_token'] ?? false;
-    final hasCalToken = checks['calendar_token'] ?? false;
-    final hasDriveToken = checks['drive_token'] ?? false;
-
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -702,7 +1632,7 @@ class _SidebarState extends State<Sidebar> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'PERSONAL HEALTH',
+            title,
             style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w600,
@@ -711,37 +1641,159 @@ class _SidebarState extends State<Sidebar> {
             ),
           ),
           const SizedBox(height: 8),
-          _buildHealthRow(theme, 'Credentials JSON', hasCredsFile),
-          const SizedBox(height: 4),
-          _buildHealthRow(theme, 'Gmail Access', hasGmailToken),
-          const SizedBox(height: 4),
-          _buildHealthRow(theme, 'Calendar Access', hasCalToken),
-          const SizedBox(height: 4),
-          _buildHealthRow(theme, 'Drive Access', hasDriveToken),
+          ...rows,
         ],
       ),
     );
   }
 
-  Widget _buildHealthRow(ThemeData theme, String label, bool isOk) {
+  Widget _buildFileAgentHealthCard(ChatProvider provider, ThemeData theme) {
+    final health = provider.fileAgentHealth;
+    final checks = health['checks'] as Map<String, dynamic>? ?? {};
+    final isOnline = provider.isBackendOnline;
+    final hasFs = isOnline && (checks['filesystem_access'] ?? true);
+    final hasQdrant = isOnline && (checks['qdrant_db'] ?? true);
+    // Files stay on this Mac only when Gemini (cloud) is not in use.
+    final isPrivacy = isOnline && !provider.isUsingGemini;
+
+    return _buildHealthCard(
+      theme: theme,
+      status: isOnline ? 'online' : 'offline',
+      title: 'FILE EXPLORER HEALTH',
+      offlineLabel: 'File Explorer offline',
+      rows: [
+        _buildHealthRow(theme, 'Filesystem Access', hasFs),
+        const SizedBox(height: 4),
+        _buildHealthRow(theme, 'Qdrant Vector DB', hasQdrant),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          isPrivacy
+              ? 'Privacy Mode (local only)'
+              : 'Privacy Mode (Gemini cloud)',
+          isPrivacy,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPersonalHealthCard(ChatProvider provider, ThemeData theme) {
+    final health = provider.personalAgentHealth;
+    final checks = health['checks'] as Map<String, dynamic>? ?? {};
+    final isOnline = provider.isBackendOnline;
+
+    return _buildHealthCard(
+      theme: theme,
+      status: isOnline ? 'online' : 'offline',
+      title: 'PERSONAL AGENT HEALTH',
+      offlineLabel: 'Personal Agent offline',
+      rows: [
+        _buildHealthRow(
+          theme,
+          'Credentials JSON',
+          isOnline && (checks['google_credentials_file'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          'Gmail Access',
+          isOnline && (checks['gmail_token'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          'Calendar Access',
+          isOnline && (checks['calendar_token'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          'Drive Access',
+          isOnline && (checks['drive_token'] ?? false),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMeetingHealthCard(ChatProvider provider, ThemeData theme) {
+    final health = provider.personalAgentHealth;
+    final checks = health['checks'] as Map<String, dynamic>? ?? {};
+    final isOnline = provider.isBackendOnline;
+    final status = isOnline
+        ? (health['status'] as String? ?? 'online')
+        : 'offline';
+
+    return _buildHealthCard(
+      theme: theme,
+      status: status,
+      title: 'MEETING SCRIBE HEALTH',
+      offlineLabel: 'Meeting Scribe offline',
+      rows: [
+        _buildHealthRow(
+          theme,
+          'Google OAuth',
+          isOnline && (checks['google_credentials_file'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          'Drive Cloud Sync',
+          isOnline && (checks['drive_token'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(
+          theme,
+          'Gmail Dispatch',
+          isOnline && (checks['gmail_token'] ?? false),
+        ),
+        const SizedBox(height: 4),
+        _buildHealthRow(theme, 'Voxtral 4B Audio', isOnline),
+        const SizedBox(height: 4),
+        _buildHealthRow(theme, 'LocateAnything-3B', isOnline),
+      ],
+    );
+  }
+
+  Widget _buildHealthRow(
+    ThemeData theme,
+    String label,
+    bool isOk, [
+    String? statusText,
+  ]) {
+    final displayStatus = statusText ?? (isOk ? 'Online' : 'Offline');
     return Row(
       children: [
-        Icon(
-          isOk
-              ? Icons.check_circle_rounded
-              : Icons.radio_button_unchecked_rounded,
-          size: 13,
-          color: isOk ? theme.successFg : theme.fgMuted,
+        Container(
+          width: 13,
+          height: 13,
+          decoration: BoxDecoration(
+            color: isOk ? theme.successFg : theme.dangerFg,
+            shape: BoxShape.circle,
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            isOk ? Icons.check_rounded : Icons.close_rounded,
+            size: 9.5,
+            color: Colors.white,
+          ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 7),
         Expanded(
           child: Text(
             label,
             style: TextStyle(
               fontSize: 11,
-              color: isOk ? theme.fgDefault : theme.fgMuted,
-              fontWeight: isOk ? FontWeight.w600 : FontWeight.normal,
+              color: theme.fgDefault,
+              fontWeight: FontWeight.w600,
             ),
+          ),
+        ),
+        Text(
+          displayStatus,
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: FontWeight.w700,
+            color: isOk ? theme.successFg : theme.dangerFg,
           ),
         ),
       ],
@@ -766,7 +1818,7 @@ class _SidebarState extends State<Sidebar> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.settings_outlined, size: 16, color: theme.fgMuted),
+              Icon(Icons.settings_outlined, size: 16, color: theme.accentFg),
               const SizedBox(width: 8),
               Text(
                 'Settings',
@@ -792,7 +1844,7 @@ class _SidebarState extends State<Sidebar> {
           if (widget.onOpenDatabaseExplorer != null) {
             widget.onOpenDatabaseExplorer!();
           } else {
-            showDialog(
+            showBlurredDialog(
               context: context,
               builder: (ctx) => DatabaseExplorerDialog(
                 onClose: () => Navigator.of(ctx).pop(),

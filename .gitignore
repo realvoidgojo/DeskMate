@@ -25,11 +25,16 @@ node_modules/
 dist/
 
 # PyInstaller
-terminal-ai-agent/build/
-terminal-ai-agent/dist/
+deskmate_engine/build/
+deskmate_engine/dist/
 
 # IDE & OS
 .vscode/
 .DS_Store
 *.swp
+
+# DeskMate Session & Meeting Outputs
+output/
+deskmate_engine/output/
+*.wav
 

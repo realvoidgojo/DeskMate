@@ -1,14 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:http/http.dart' as http;
 
+import '../core/constants.dart';
+
 class BackendManager {
   static Process? _process;
-  static int _assignedPort = 2026;
+  static bool _isStarting = false;
+  static int _assignedPort = AppConstants.defaultPort;
 
-  static const int defaultPort = 2026;
+  static const int defaultPort = AppConstants.defaultPort;
 
   static int get assignedPort => _assignedPort;
   static String get backendUrl => 'http://127.0.0.1:$_assignedPort';
@@ -48,14 +53,35 @@ class BackendManager {
           .timeout(const Duration(milliseconds: 1500));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return data is Map &&
-            data['status'] == 'ok' &&
-            data.containsKey('local_llm');
+        return data is Map && isDeskMateHealth(data);
       }
       return false;
     } catch (_) {
       return false;
     }
+  }
+
+  /// True only for DeskMate's own engine, so another local service that
+  /// happens to answer `/api/health` on 8080 is never adopted.
+  static bool isDeskMateHealth(Map health) =>
+      health['status'] == 'ok' &&
+      health.containsKey('local_llm') &&
+      health.containsKey('app_version');
+
+  /// Kill any orphaned or stale background backend instances from previous builds
+  static Future<void> killStaleBackendProcesses() async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('taskkill', [
+          '/F',
+          '/IM',
+          'deskmate_backend.exe',
+          '/T',
+        ]);
+      } else if (Platform.isMacOS) {
+        await Process.run('/usr/bin/pkill', ['-9', '-f', 'deskmate_backend']);
+      }
+    } catch (_) {}
   }
 
   /// Returns true if running on macOS directly from a mounted DMG or AppTranslocation sandbox
@@ -84,9 +110,9 @@ class BackendManager {
         // Strip quarantine attributes so it opens cleanly without Gatekeeper bounce
         await Process.run('/usr/bin/xattr', ['-cr', targetApp]);
         await Process.run('/bin/chmod', ['-R', 'u+rwX,go+rX', targetApp]);
-        // Launch the /Applications copy and exit current instance
         await Process.run('/usr/bin/open', [targetApp]);
-        exit(0);
+        await stop();
+        SystemNavigator.pop();
       }
     } catch (e) {
       debugPrint('Failed to copy DeskMate to Applications: $e');
@@ -96,22 +122,20 @@ class BackendManager {
 
   /// Launch backend executable silently in background on dynamic free port
   static Future<void> start() async {
-    if (!Platform.isWindows && !Platform.isMacOS) {
+    if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) {
       debugPrint(
-        'Automated local background process spawning is only supported on Windows and macOS.',
+        'Automated local background process spawning is only supported on Windows, macOS, and Linux.',
       );
       return;
     }
 
-    for (final port in [2026, 8080, 8000]) {
-      if (await isBackendRunning(port)) {
-        _assignedPort = port;
-        debugPrint(
-          'Backend is already running on port $port. Reusing existing instance.',
-        );
-        return;
-      }
+    if (_isStarting) {
+      debugPrint(
+        'BackendManager.start() is already in progress. Ignoring duplicate invocation.',
+      );
+      return;
     }
+    _isStarting = true;
 
     try {
       final appDir = p.dirname(Platform.resolvedExecutable);
@@ -181,8 +205,79 @@ class BackendManager {
             break;
           }
         }
+      } else if (Platform.isLinux) {
+        final candidatePaths = [
+          p.join(
+            appDir,
+            'data',
+            'flutter_assets',
+            'assets',
+            'backend',
+            'deskmate_backend',
+          ),
+          p.join(
+            appDir,
+            'flutter_assets',
+            'assets',
+            'backend',
+            'deskmate_backend',
+          ),
+          p.join(appDir, 'assets', 'backend', 'deskmate_backend'),
+          p.join(appDir, 'deskmate_backend'),
+          p.join(appDir, '..', 'deskmate_engine', 'dist', 'deskmate_backend'),
+          p.join(appDir, '..', 'terminal-ai-agent', 'dist', 'deskmate_backend'),
+        ];
+
+        for (final candidate in candidatePaths) {
+          final file = File(candidate);
+          if (await file.exists() && await file.length() > 1000) {
+            exePath = candidate;
+            break;
+          }
+        }
+      }
+
+      // Check if bundled binary is newer/different from installed local user binary
+      bool needsBinaryUpdate = false;
+      if (Platform.isMacOS && exePath.isNotEmpty) {
+        final home = Platform.environment['HOME'] ?? '';
+        if (home.isNotEmpty) {
+          final localExe = File(
+            p.join(
+              home,
+              'Library',
+              'Application Support',
+              'DeskMate',
+              'bin',
+              'deskmate_backend',
+            ),
+          );
+          final sourceFile = File(exePath);
+          if (!await localExe.exists() ||
+              (await localExe.length()) != (await sourceFile.length())) {
+            needsBinaryUpdate = true;
+          }
+        }
+      }
+
+      // If a new build binary was bundled, kill stale background processes so it replaces cleanly
+      if (needsBinaryUpdate) {
+        debugPrint(
+          'New bundled backend build detected. Terminating stale background processes...',
+        );
+        await killStaleBackendProcesses();
+        await Future.delayed(const Duration(milliseconds: 500));
       } else {
-        return;
+        // Otherwise reuse healthy existing instance if it supports meeting intelligence
+        for (final port in AppConstants.legacyPorts) {
+          if (await isBackendRunning(port)) {
+            _assignedPort = port;
+            debugPrint(
+              'Backend is already running on port $port with meeting readiness. Reusing existing instance.',
+            );
+            return;
+          }
+        }
       }
 
       if (exePath.isEmpty || !await File(exePath).exists()) {
@@ -228,6 +323,32 @@ class BackendManager {
               await sourceFile.copy(localExe.path);
             }
             exePath = localExe.path;
+
+            // Also copy macos_audio_capture helper if bundled in the same directory
+            final sourceDir = p.dirname(sourceFile.path);
+            final sourceHelper = File(p.join(sourceDir, 'macos_audio_capture'));
+            final localHelper = File(
+              p.join(binDir.path, 'macos_audio_capture'),
+            );
+            if (await sourceHelper.exists()) {
+              final hSourceLen = await sourceHelper.length();
+              final hTargetLen = await localHelper.exists()
+                  ? await localHelper.length()
+                  : -1;
+              if (!await localHelper.exists() || hSourceLen != hTargetLen) {
+                await sourceHelper.copy(localHelper.path);
+              }
+              try {
+                await Process.run('/usr/bin/xattr', [
+                  '-d',
+                  'com.apple.quarantine',
+                  localHelper.path,
+                ]);
+              } catch (_) {}
+              try {
+                await Process.run('/bin/chmod', ['+x', localHelper.path]);
+              } catch (_) {}
+            }
           } catch (_) {}
 
           try {
@@ -248,6 +369,15 @@ class BackendManager {
           await supportDir.create(recursive: true);
           workingDir = supportDir.path;
         }
+      } else if (Platform.isLinux) {
+        final home = Platform.environment['HOME'] ?? '';
+        final supportDir = Directory(p.join(home, '.deskmate'));
+        await supportDir.create(recursive: true);
+        workingDir = supportDir.path;
+
+        try {
+          await Process.run('chmod', ['+x', exePath]);
+        } catch (_) {}
       }
 
       debugPrint(
@@ -276,15 +406,22 @@ class BackendManager {
       });
     } catch (e) {
       debugPrint('Failed to launch backend subprocess: $e');
+    } finally {
+      _isStarting = false;
     }
   }
 
   /// Stop the backend subprocess
   static Future<void> stop() async {
-    if (!Platform.isWindows && !Platform.isMacOS) return;
+    if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) return;
     if (_process == null) return;
     try {
-      _process!.kill(ProcessSignal.sigkill);
+      _process!.kill(ProcessSignal.sigterm);
+      try {
+        await _process!.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {
+        _process!.kill(ProcessSignal.sigkill);
+      }
       if (Platform.isWindows) {
         await Process.run('taskkill', [
           '/F',
@@ -292,8 +429,8 @@ class BackendManager {
           'deskmate_backend.exe',
           '/T',
         ]);
-      } else if (Platform.isMacOS) {
-        await Process.run('/usr/bin/pkill', ['-9', '-f', 'deskmate_backend']);
+      } else if (Platform.isMacOS || Platform.isLinux) {
+        await Process.run('pkill', ['-9', '-f', 'deskmate_backend']);
       }
     } catch (_) {}
     _process = null;

@@ -1,5 +1,29 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+
+/// Display a dialog with the signature DeskMate frosted-glass blurred backdrop (matches Reasoning modal)
+Future<T?> showBlurredDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool barrierDismissible = true,
+  Color? barrierColor,
+}) {
+  final isDark = Theme.of(context).brightness == Brightness.dark;
+  final effectiveBarrierColor =
+      barrierColor ??
+      (isDark ? const Color(0x66010409) : const Color(0x401F2328));
+  return showDialog<T>(
+    context: context,
+    barrierDismissible: barrierDismissible,
+    barrierColor: effectiveBarrierColor,
+    builder: (ctx) => BackdropFilter(
+      filter: ImageFilter.blur(sigmaX: 4.5, sigmaY: 4.5),
+      child: builder(ctx),
+    ),
+  );
+}
 
 /// GitHub Primer Design System Tokens & DeskMate Purple Theme
 class AppTheme {
@@ -21,15 +45,22 @@ class AppTheme {
     end: Alignment.centerRight,
   );
 
-  // Brand aliases for semantic compatibility
-  static const Color brandCyan = purplePrimary;
-  static const Color brandCyanLight = purpleLight;
-  static const Color brandCyanDark = purpleActive;
-  static const Color brandIndigo = purplePrimary;
-  static const Color brandIndigoLight = purpleMid;
-  static const Color brandViolet = purpleLight;
-  static const Color brandVioletLight = purpleHighlight;
-  static const LinearGradient brandGradient = purpleGradient;
+  // Meeting / domain semantic colors
+  static const Color emerald = Color(0xFF10B981);
+  static const Color emeraldLight = Color(0xFF34D399);
+  static const Color amber = Color(0xFFF59E0B);
+  static const Color amberLight = Color(0xFFFBBF24);
+  static const Color amberDark = Color(0xFFD97706);
+
+  static final ChipThemeData _chipTheme = ChipThemeData(
+    elevation: 0,
+    pressElevation: 0,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+  );
+  static const Color recordingRed = Color(0xFFDC2626);
+  static const Color recordingRedLight = Color(0xFFF87171);
+  static const Color teal = Color(0xFF0D9488);
+  static const Color indigo = Color(0xFF6366F1);
 
   // --- GITHUB PRIMER LIGHT DEFAULT TOKENS ---
   static const Color lightBgCanvas = Color(0xFFFFFFFF);
@@ -158,6 +189,7 @@ class AppTheme {
         disabledMouseCursor: SystemMouseCursors.basic,
       ),
     ),
+    chipTheme: _chipTheme,
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: lightBgCanvas,
@@ -255,6 +287,7 @@ class AppTheme {
         disabledMouseCursor: SystemMouseCursors.basic,
       ),
     ),
+    chipTheme: _chipTheme,
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: darkBgCanvas,
@@ -326,4 +359,19 @@ extension GitHubPrimerTheme on ThemeData {
   Color get dangerBg => isDark ? AppTheme.darkDangerBg : AppTheme.lightDangerBg;
   Color get dangerBorder =>
       isDark ? AppTheme.darkDangerBorder : AppTheme.lightDangerBorder;
+
+  // Panel / code block backgrounds (replaces hardcoded 0xFF161B22 / 0xFFF6F8FA)
+  Color get bgPanel =>
+      isDark ? const Color(0xFF161B22) : const Color(0xFFF6F8FA);
+  Color get bgCode =>
+      isDark ? const Color(0xFF0D1117) : const Color(0xFFF6F8FA);
+
+  // Success text on dark/light (replaces hardcoded 0xFF7EE787 / 0xFF1A7F37 ternaries)
+  Color get successText =>
+      isDark ? const Color(0xFF7EE787) : const Color(0xFF1A7F37);
+
+  // Status pill convenience
+  Color get statusOk => const Color(0xFF2DA44E);
+  Color get statusBad =>
+      isDark ? AppTheme.darkDangerFg : AppTheme.lightDangerFg;
 }

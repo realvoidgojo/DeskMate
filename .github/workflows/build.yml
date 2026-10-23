@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - dev
+      - feat/meeting-intelligence-engine
+      - linux-build
 
   pull_request:
     branches:
@@ -21,6 +23,7 @@ on:
           - all
           - macos
           - windows
+          - linux
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -55,14 +58,14 @@ jobs:
           pip install flake8
 
       - name: Critical Flake8 checks
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           flake8 . \
             --select=E9,F63,F7,F82 \
             --exclude=.venv,venv,build,dist,__pycache__
 
       - name: Complexity and line length
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           flake8 . \
             --max-complexity=15 \
@@ -91,14 +94,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
       - name: Run tests
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           pytest -v \
             --cov=. \
@@ -129,7 +132,7 @@ jobs:
           pip install bandit
 
       - name: Run Bandit
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           bandit -r . \
             -x .venv,venv,build,dist,__pycache__ \
@@ -155,14 +158,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           python -m pip install --upgrade pip setuptools
           pip install -r requirements.txt
+          pip install --no-deps "pillow>=13.0.0"
           pip install pip-audit
 
       - name: Run pip-audit
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           pip-audit
 
@@ -256,6 +260,7 @@ jobs:
     outputs:
       windows: ${{ steps.filter.outputs.windows }}
       macos: ${{ steps.filter.outputs.macos }}
+      linux: ${{ steps.filter.outputs.linux }}
 
     steps:
       - name: Checkout
@@ -268,15 +273,22 @@ jobs:
           filters: |
             windows:
               - 'deskmate_app/**'
-              - 'terminal-ai-agent/**'
+              - 'deskmate_engine/**'
               - 'deskmate_app/windows/**'
               - '.github/workflows/**'
 
             macos:
               - 'deskmate_app/**'
-              - 'terminal-ai-agent/**'
+              - 'deskmate_engine/**'
               - 'deskmate_app/macos/**'
               - '.github/workflows/**'
+
+            linux:
+              - 'deskmate_app/**'
+              - 'deskmate_engine/**'
+              - 'deskmate_app/linux/**'
+              - '.github/workflows/**'
+              - 'scripts/**'
 
 
 # ============================================================
@@ -326,16 +338,17 @@ jobs:
           channel: stable
 
       - name: Create Python environment
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         shell: pwsh
         run: |
           python -m venv .venv
           .\.venv\Scripts\python.exe -m pip install --upgrade pip
           .\.venv\Scripts\pip.exe install -r requirements.txt
+          .\.venv\Scripts\pip.exe install --no-deps "pillow>=13.0.0"
           .\.venv\Scripts\pip.exe install pyinstaller
 
       - name: Build backend
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         shell: pwsh
         run: |
           .\.venv\Scripts\pyinstaller.exe deskmate_backend.spec --clean
@@ -345,7 +358,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "deskmate_app\assets\backend" -Force
           Copy-Item `
-            "terminal-ai-agent\dist\deskmate_backend.exe" `
+            "deskmate_engine\dist\deskmate_backend.exe" `
             "deskmate_app\assets\backend\deskmate_backend.exe" `
             -Force
 
@@ -386,7 +399,7 @@ jobs:
           path: DeskMate-Windows.zip
 
       - name: Publish Windows Continuous Pre-release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feat/meeting-intelligence-engine')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous
@@ -394,6 +407,7 @@ jobs:
           name: "DeskMate Continuous Build"
           body: "Automated continuous build from ${{ github.ref_name }} branch (commit ${{ github.sha }})."
           prerelease: true
+          make_latest: false
           files: |
             DeskMate-Windows.zip
         env:
@@ -447,26 +461,36 @@ jobs:
           channel: stable
 
       - name: Create Python environment
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install --no-deps "pillow>=13.0.0"
           .venv/bin/pip install pyinstaller
 
       - name: Build backend
-        working-directory: terminal-ai-agent
+        working-directory: deskmate_engine
         run: |
+          swiftc -O helpers/macos_audio_capture.swift -o helpers/macos_audio_capture
+          chmod +x helpers/macos_audio_capture
+          mkdir -p services/meeting_intelligence/audio_service
+          cp helpers/macos_audio_capture services/meeting_intelligence/audio_service/
+          chmod +x services/meeting_intelligence/audio_service/macos_audio_capture
           .venv/bin/pyinstaller deskmate_backend.spec --clean
 
       - name: Copy backend binary
         run: |
           mkdir -p deskmate_app/assets/backend
           cp \
-            terminal-ai-agent/dist/deskmate_backend \
+            deskmate_engine/dist/deskmate_backend \
             deskmate_app/assets/backend/deskmate_backend
+          cp \
+            deskmate_engine/helpers/macos_audio_capture \
+            deskmate_app/assets/backend/macos_audio_capture
 
           chmod +x deskmate_app/assets/backend/deskmate_backend
+          chmod +x deskmate_app/assets/backend/macos_audio_capture
 
       - name: Flutter dependencies
         working-directory: deskmate_app
@@ -497,6 +521,7 @@ jobs:
           chmod -R u+rwX,go+rX dmg/*.app
           chmod +x dmg/*.app/Contents/MacOS/* || true
           find dmg/*.app/Contents -type f -name "deskmate_backend" -exec chmod +x {} + || true
+          find dmg/*.app/Contents -type f -name "macos_audio_capture" -exec chmod +x {} + || true
 
           # Strip extended quarantine attributes before creating disk image
           xattr -cr dmg/*.app || true
@@ -505,7 +530,7 @@ jobs:
           codesign --force --deep --sign - dmg/*.app || true
 
           # Add native double-click auto-installer inside DMG (zero-setup)
-          cp scripts/install_macos.command "dmg/Install DeskMate.command"
+          cp .github/scripts/install_macos.command "dmg/Install DeskMate.command"
           chmod +x "dmg/Install DeskMate.command"
 
           hdiutil create \
@@ -533,7 +558,7 @@ jobs:
           path: DeskMate-macOS.zip
 
       - name: Publish Continuous Pre-release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feat/meeting-intelligence-engine')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous
@@ -541,9 +566,139 @@ jobs:
           name: "DeskMate Continuous Build"
           body: "Automated continuous build from ${{ github.ref_name }} branch (commit ${{ github.sha }})."
           prerelease: true
+          make_latest: false
           files: |
             DeskMate-macOS.dmg
             DeskMate-macOS.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+# ============================================================
+# 11. LINUX BUILD
+# ============================================================
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-22.04
+
+    needs:
+      - flake8-lint
+      - python-tests
+      - bandit-security
+      - dependency-security
+      - secret-scan
+      - trivy-scan
+      - flutter-quality
+      - check-changes
+
+    if: |
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (
+          github.event.inputs.target_platform == 'all' ||
+          github.event.inputs.target_platform == 'linux'
+        )
+      )
+      ||
+      (
+        github.event_name == 'push' &&
+        needs.check-changes.outputs.linux == 'true'
+      )
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgtk-3-dev \
+            liblzma-dev \
+            libstdc++-12-dev
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Python environment & build backend
+        working-directory: deskmate_engine
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install --no-deps "pillow>=13.0.0"
+          .venv/bin/pip install pyinstaller
+          .venv/bin/pyinstaller deskmate_backend.spec --clean
+
+      - name: Copy backend binary to Flutter assets
+        run: |
+          mkdir -p deskmate_app/assets/backend
+          cp \
+            deskmate_engine/dist/deskmate_backend \
+            deskmate_app/assets/backend/deskmate_backend
+          chmod +x deskmate_app/assets/backend/deskmate_backend
+
+      - name: Flutter dependencies
+        working-directory: deskmate_app
+        run: |
+          flutter pub get
+
+      - name: Build Linux application
+        working-directory: deskmate_app
+        run: |
+          flutter build linux --release
+
+      - name: Verify Linux build
+        run: |
+          test -f deskmate_app/build/linux/x64/release/bundle/DeskMate
+
+      - name: Package Linux tar.gz
+        run: |
+          mkdir -p package/DeskMate
+          cp -r deskmate_app/build/linux/x64/release/bundle/* package/DeskMate/
+          cp scripts/run_linux.sh package/DeskMate/run.sh
+          cp scripts/install_linux.sh package/DeskMate/install_linux.sh
+          cp scripts/deskmate.desktop package/DeskMate/deskmate.desktop
+          cp deskmate_app/assets/app_icon.png package/DeskMate/deskmate.png
+          chmod +x package/DeskMate/DeskMate
+          chmod +x package/DeskMate/run.sh
+          chmod +x package/DeskMate/install_linux.sh
+          chmod +x package/DeskMate/data/flutter_assets/assets/backend/deskmate_backend || true
+          tar -czf DeskMate-Linux-x64.tar.gz -C package DeskMate
+
+      - name: Upload Linux tar.gz
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskMate-Linux-Tar
+          path: DeskMate-Linux-x64.tar.gz
+
+      - name: Publish Linux Continuous Pre-release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feat/meeting-intelligence-engine')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          target_commitish: ${{ github.sha }}
+          name: "DeskMate Continuous Build"
+          body: "Automated continuous build from ${{ github.ref_name }} branch (commit ${{ github.sha }})."
+          prerelease: true
+          make_latest: false
+          files: |
+            DeskMate-Linux-x64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
 

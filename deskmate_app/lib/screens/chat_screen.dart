@@ -1,16 +1,23 @@
 import 'dart:async';
 import 'dart:ui';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+
+import '../core/constants.dart';
 import '../providers/chat_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/telemetry_accordion.dart';
 import '../widgets/sidebar.dart';
 import '../widgets/credentials_setup_dialog.dart';
+import '../widgets/google_connect_button.dart';
 import '../widgets/database_explorer_dialog.dart';
+import '../widgets/meeting_scribe_view.dart';
+import '../widgets/circular_close_button.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -34,6 +41,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isSettingsModelDropdownOpen = false;
   final TextEditingController _geminiKeyController = TextEditingController();
   final FocusNode _geminiKeyFocusNode = FocusNode();
+  late final FocusNode _shortcutFocusNode = FocusNode();
   final TextEditingController _googleClientIdController =
       TextEditingController();
   final TextEditingController _googleClientSecretController =
@@ -41,50 +49,137 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isGoogleClientSecretObscured = true;
   bool _isSavingAllSettings = false;
   String? _googleCredsError;
+  final TextEditingController _tempGeminiCtrl = TextEditingController();
+  bool _modelPopupSeeded = false;
+  String _popupSelectedModel = '';
+  bool _popupObscureGemini = true;
   late TextEditingController _backendUrlController;
   late FocusNode _backendUrlFocusNode;
 
-  String? _topNotificationMessage;
-  Timer? _topNotificationTimer;
+  OverlayEntry? _topToastOverlayEntry;
+  Timer? _topToastTimer;
 
   void _showTopNotification(String message) {
-    _topNotificationTimer?.cancel();
-    if (mounted) {
-      setState(() {
-        _topNotificationMessage = message;
-      });
-    }
-    _topNotificationTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _topNotificationMessage != null) {
-        setState(() {
-          _topNotificationMessage = null;
-        });
-      }
+    if (!mounted) return;
+    _topToastTimer?.cancel();
+    _topToastOverlayEntry?.remove();
+    _topToastOverlayEntry = null;
+
+    final overlayState = Overlay.of(context, rootOverlay: true);
+    final theme = Theme.of(context);
+    final isDesktop = MediaQuery.of(context).size.width >= 768;
+
+    _topToastOverlayEntry = OverlayEntry(
+      builder: (ctx) => Positioned(
+        top: isDesktop ? 38 : 16,
+        left: 0,
+        right: 0,
+        child: Material(
+          color: Colors.transparent,
+          child: Center(
+            child: Container(
+              margin: EdgeInsets.symmetric(horizontal: isDesktop ? 24 : 12),
+              constraints: const BoxConstraints(maxWidth: 580),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+              decoration: BoxDecoration(
+                color: theme.isDark
+                    ? const Color(0xFF0F2D1A)
+                    : const Color(0xFFEAFBF0),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: theme.isDark
+                      ? const Color(0xFF1E6038)
+                      : const Color(0xFF8CE4AC),
+                  width: 1,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(
+                      alpha: theme.isDark ? 0.35 : 0.08,
+                    ),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.check_circle_rounded,
+                    size: 16,
+                    color: theme.successFg,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      message,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: theme.successText,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  CircularCloseButton(
+                    size: 16,
+                    tooltip: 'Dismiss',
+                    onTap: () {
+                      _topToastTimer?.cancel();
+                      _topToastOverlayEntry?.remove();
+                      _topToastOverlayEntry = null;
+                    },
+                  ),
+                ],
+              ),
+            ).animate().fadeIn(duration: 180.ms).slideY(begin: -0.2, end: 0.0),
+          ),
+        ),
+      ),
+    );
+
+    overlayState.insert(_topToastOverlayEntry!);
+
+    _topToastTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted) return;
+      _topToastOverlayEntry?.remove();
+      _topToastOverlayEntry = null;
     });
   }
 
-  void _syncGoogleClientId(Map<String, dynamic> creds) {
+  void _syncGoogleCredentials(Map<String, dynamic> creds) {
     if (creds['configured'] == true &&
         creds['client_id'] != null &&
         (creds['client_id'] as String).isNotEmpty) {
       _googleClientIdController.text = creds['client_id'] as String;
-    } else {
+      final realSecret = creds['client_secret'] as String? ?? '';
+      if (realSecret.isNotEmpty) {
+        _googleClientSecretController.text = realSecret;
+      } else if (_googleClientSecretController.text.isEmpty) {
+        final maskedSecret =
+            creds['client_secret_masked'] as String? ?? '••••••••••••••••';
+        _googleClientSecretController.text = maskedSecret.isNotEmpty
+            ? maskedSecret
+            : '••••••••••••••••';
+      }
+    } else if (creds['configured'] != true) {
       _googleClientIdController.clear();
+      _googleClientSecretController.clear();
     }
   }
 
   String _formatAiConfigSummary({
-    required String model,
-    required bool hasGeminiKey,
+    required ChatProvider provider,
     String? oauthMessage,
   }) {
+    final engine = provider.isUsingGemini
+        ? AppConstants.geminiModelLabel
+        : '${provider.effectiveModel} (100% local)';
     if (oauthMessage != null) {
-      return 'Configuration updated: AI Model ($model) + $oauthMessage';
+      return 'Configuration updated: $engine + $oauthMessage';
     }
-    if (hasGeminiKey) {
-      return 'Configuration updated: Gemini Cloud + Model ($model)';
-    }
-    return 'Configuration updated: 100% Offline with Model ($model)';
+    return 'Configuration updated: $engine';
   }
 
   @override
@@ -94,18 +189,24 @@ class _ChatScreenState extends State<ChatScreen> {
     _backendUrlFocusNode.addListener(() {
       if (mounted) setState(() {});
     });
+    // Rebuild so the Gemini option appears in the picker while a key is typed.
+    _geminiKeyController.addListener(() {
+      if (mounted) setState(() {});
+    });
     _geminiKeyFocusNode.addListener(() {
       if (mounted) setState(() {});
     });
     final provider = Provider.of<ChatProvider>(context, listen: false);
     _backendUrlController = TextEditingController(text: provider.backendUrl);
     _geminiKeyController.text = provider.geminiApiKey;
-    _syncGoogleClientId(provider.personalCredentials);
+    _syncGoogleCredentials(provider.personalCredentials);
   }
 
   @override
   void dispose() {
-    _topNotificationTimer?.cancel();
+    _topToastTimer?.cancel();
+    _topToastOverlayEntry?.remove();
+    _topToastOverlayEntry = null;
     _messageController.dispose();
     _messageFocusNode.dispose();
     _scrollController.dispose();
@@ -114,7 +215,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _googleClientIdController.dispose();
     _googleClientSecretController.dispose();
     _backendUrlController.dispose();
+    _tempGeminiCtrl.dispose();
     _backendUrlFocusNode.dispose();
+    _shortcutFocusNode.dispose();
     super.dispose();
   }
 
@@ -141,12 +244,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final provider = Provider.of<ChatProvider>(context, listen: false);
     _backendUrlController.text = provider.backendUrl;
     _geminiKeyController.text = provider.geminiApiKey;
-    _settingsSelectedModel = provider.effectiveModel.isNotEmpty
-        ? provider.effectiveModel
+    _settingsSelectedModel = provider.selectedModel.isNotEmpty
+        ? provider.selectedModel
         : null;
-    _syncGoogleClientId(provider.personalCredentials);
+    _syncGoogleCredentials(provider.personalCredentials);
     _googleCredsError = null;
-    provider.fetchPersonalCredentials();
+    provider.fetchPersonalCredentials().then((_) {
+      if (mounted) {
+        setState(() {
+          _syncGoogleCredentials(provider.personalCredentials);
+        });
+      }
+    });
     setState(() {
       _isSettingsModelDropdownOpen = false;
       _isSettingsOpen = true;
@@ -198,12 +307,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final provider = Provider.of<ChatProvider>(context);
     final isDesktop = MediaQuery.of(context).size.width > 900;
     final theme = Theme.of(context);
+    if (!provider.showModelSelectionDialog) _modelPopupSeeded = false;
 
     // Auto-scroll on new messages
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
     return KeyboardListener(
-      focusNode: FocusNode()..requestFocus(),
+      focusNode: _shortcutFocusNode,
+      autofocus: true,
       onKeyEvent: (event) {
         if (event.logicalKey.keyLabel == 'Escape') {
           if (_editingMessageIndex != null) {
@@ -235,7 +346,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 actions: [
                   IconButton(
                     onPressed: _openSettings,
-                    icon: Icon(Icons.settings_outlined, color: theme.fgMuted),
+                    icon: Icon(Icons.settings_outlined, color: theme.accentFg),
                   ),
                   IconButton(
                     onPressed: () => provider.resetChat(),
@@ -257,6 +368,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       _isSetupGuideOpen = true;
                     });
                   },
+                  onShowTopNotification: _showTopNotification,
                 ),
               ),
         body: Stack(
@@ -277,6 +389,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           _isSetupGuideOpen = true;
                         });
                       },
+                      onShowTopNotification: _showTopNotification,
                     ),
                   ),
                 Expanded(
@@ -284,48 +397,56 @@ class _ChatScreenState extends State<ChatScreen> {
                     color: theme.bgCanvas,
                     child: Stack(
                       children: [
-                        Column(
-                          children: [
-                            Expanded(
-                              child: provider.messages.isEmpty
-                                  ? _buildEmptyState(theme)
-                                  : ListView.builder(
-                                      controller: _scrollController,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 24,
-                                        vertical: 24,
-                                      ),
-                                      itemCount:
-                                          provider.messages.length +
-                                          (provider.isSending ? 1 : 0),
-                                      itemBuilder: (context, index) {
-                                        if (index == provider.messages.length) {
-                                          return _buildTypingIndicator(
-                                            provider,
-                                            theme,
-                                          );
-                                        }
-                                        return ChatBubble(
-                                          message: provider.messages[index],
-                                          index: index,
-                                          isSending: provider.isSending,
-                                          onEdit: () {
-                                            _onEditMessage(
-                                              index,
-                                              provider.messages[index].content,
+                        if (provider.mode == AgentMode.meeting)
+                          MeetingScribeView(
+                            onOpenSetupGuide: ([mode]) {
+                              setState(() {
+                                _guideOverrideMode = mode ?? AgentMode.meeting;
+                                _isSetupGuideOpen = true;
+                              });
+                            },
+                          )
+                        else
+                          Column(
+                            children: [
+                              Expanded(
+                                child: provider.messages.isEmpty
+                                    ? _buildEmptyState(theme)
+                                    : ListView.builder(
+                                        controller: _scrollController,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 24,
+                                          vertical: 24,
+                                        ),
+                                        itemCount:
+                                            provider.messages.length +
+                                            (provider.isSending ? 1 : 0),
+                                        itemBuilder: (context, index) {
+                                          if (index ==
+                                              provider.messages.length) {
+                                            return _buildTypingIndicator(
+                                              provider,
+                                              theme,
                                             );
-                                          },
-                                        );
-                                      },
-                                    ),
-                            ),
-                            _buildInputArea(provider, theme),
-                          ],
-                        ),
-                        if (_topNotificationMessage != null)
-                          _buildTopNotificationBanner(
-                            theme,
-                            isDesktop: isDesktop,
+                                          }
+                                          return ChatBubble(
+                                            message: provider.messages[index],
+                                            index: index,
+                                            isSending: provider.isSending,
+                                            onEdit: () {
+                                              _onEditMessage(
+                                                index,
+                                                provider
+                                                    .messages[index]
+                                                    .content,
+                                              );
+                                            },
+                                          );
+                                        },
+                                      ),
+                              ),
+                              _buildInputArea(provider, theme),
+                            ],
                           ),
                       ],
                     ),
@@ -365,11 +486,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: GestureDetector(
                   onTap: () => setState(() => _isSetupGuideOpen = false),
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                    filter: ImageFilter.blur(sigmaX: 4.5, sigmaY: 4.5),
                     child: Container(
                       color: theme.isDark
-                          ? const Color(0x99010409)
-                          : const Color(0x661F2328),
+                          ? const Color(0x66010409)
+                          : const Color(0x401F2328),
                     ),
                   ),
                 ).animate().fadeIn(duration: 150.ms),
@@ -399,11 +520,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: GestureDetector(
                   onTap: () => setState(() => _isDatabaseExplorerOpen = false),
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 4, sigmaY: 4),
+                    filter: ImageFilter.blur(sigmaX: 4.5, sigmaY: 4.5),
                     child: Container(
                       color: theme.isDark
-                          ? const Color(0x99010409)
-                          : const Color(0x661F2328),
+                          ? const Color(0x66010409)
+                          : const Color(0x401F2328),
                     ),
                   ),
                 ).animate().fadeIn(duration: 150.ms),
@@ -430,11 +551,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: GestureDetector(
                   onTap: () => provider.dismissModelSelectionDialog(),
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                    filter: ImageFilter.blur(sigmaX: 4.5, sigmaY: 4.5),
                     child: Container(
                       color: theme.isDark
-                          ? const Color(0x99010409)
-                          : const Color(0x661F2328),
+                          ? const Color(0x66010409)
+                          : const Color(0x401F2328),
                     ),
                   ),
                 ).animate().fadeIn(duration: 150.ms),
@@ -456,110 +577,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildTopNotificationBanner(ThemeData theme, {bool isDesktop = true}) {
-    if (_topNotificationMessage == null) return const SizedBox.shrink();
-
-    return Positioned(
-      top: isDesktop ? 38 : 16,
-      left: 0,
-      right: 0,
-      child: Center(
-        child:
-            Container(
-                  margin: EdgeInsets.symmetric(horizontal: isDesktop ? 24 : 12),
-                  constraints: const BoxConstraints(maxWidth: 580),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 9,
-                  ),
-                  decoration: BoxDecoration(
-                    color: theme.isDark
-                        ? const Color(0xFF0F2D1A)
-                        : const Color(0xFFEAFBF0),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: theme.isDark
-                          ? const Color(0xFF1E6038)
-                          : const Color(0xFF8CE4AC),
-                      width: 1,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(
-                          alpha: theme.isDark ? 0.35 : 0.08,
-                        ),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.check_circle_rounded,
-                        size: 16,
-                        color: theme.isDark
-                            ? const Color(0xFF3FB950)
-                            : const Color(0xFF1A7F37),
-                      ),
-                      const SizedBox(width: 9),
-                      Flexible(
-                        child: Text(
-                          _topNotificationMessage!,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: theme.isDark
-                                ? const Color(0xFF7EE787)
-                                : const Color(0xFF1A7F37),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      MouseRegion(
-                        cursor: SystemMouseCursors.click,
-                        child: GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              _topNotificationMessage = null;
-                            });
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(2),
-                            decoration: BoxDecoration(
-                              color:
-                                  (theme.isDark
-                                          ? const Color(0xFF7EE787)
-                                          : const Color(0xFF1A7F37))
-                                      .withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Icon(
-                              Icons.close_rounded,
-                              size: 14,
-                              color: theme.isDark
-                                  ? const Color(0xFF7EE787)
-                                  : const Color(0xFF1A7F37),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                )
-                .animate()
-                .slideY(
-                  begin: -0.6,
-                  end: 0,
-                  duration: 220.ms,
-                  curve: Curves.easeOutCubic,
-                )
-                .fadeIn(duration: 180.ms),
-      ),
-    );
-  }
-
   Widget _buildSettingsPanel(ChatProvider provider, ThemeData theme) {
     return Container(
       decoration: BoxDecoration(
@@ -574,7 +591,7 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             // ─── Compact, Modern Header ──────────────────────────────────────────
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
+              padding: const EdgeInsets.fromLTRB(18, 20, 18, 14),
               decoration: BoxDecoration(
                 color: theme.isDark ? theme.bgCanvas : Colors.white,
                 border: Border(
@@ -649,7 +666,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 physics: const BouncingScrollPhysics(),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
-                  vertical: 14,
+                  vertical: 16,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -660,10 +677,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       icon: Icons.memory_rounded,
                       title: 'AI ENGINE & LOCAL MODEL',
                     ),
-                    const SizedBox(height: 7),
+                    const SizedBox(height: 9),
                     _buildAiEngineCard(provider, theme),
 
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 18),
 
                     // ─── SECTION 2: GOOGLE WORKSPACE OAUTH ─────────────────
                     _buildSettingsSectionHeader(
@@ -671,10 +688,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       icon: Icons.vpn_key_rounded,
                       title: 'GOOGLE WORKSPACE OAUTH 2.0',
                     ),
-                    const SizedBox(height: 7),
+                    const SizedBox(height: 9),
                     _buildOAuthCard(provider, theme),
 
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 18),
 
                     // ─── SECTION 3: BACKEND SERVER ─────────────────────────
                     _buildSettingsSectionHeader(
@@ -682,10 +699,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       icon: Icons.dns_rounded,
                       title: 'BACKEND SERVER',
                     ),
-                    const SizedBox(height: 7),
-                    _buildBackendAndSaveCard(provider, theme),
+                    const SizedBox(height: 9),
+                    _buildBackendCard(provider, theme),
 
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 18),
 
                     // ─── SECTION 4: APPEARANCE ─────────────────────────────
                     _buildSettingsSectionHeader(
@@ -693,41 +710,121 @@ class _ChatScreenState extends State<ChatScreen> {
                       icon: Icons.palette_outlined,
                       title: 'APPEARANCE',
                     ),
-                    const SizedBox(height: 7),
+                    const SizedBox(height: 9),
                     _buildThemeSelectorInSettings(provider, theme),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 20),
                   ],
                 ),
               ),
             ),
 
-            // ─── PINNED FOOTER: SYSTEM & BUILD INFO (AT THE BOTTOM) ───────
+            // ─── PINNED FOOTER: UNIFIED SAVE BUTTON & BUILD INFO ───────
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               decoration: BoxDecoration(
                 color: theme.isDark ? theme.bgCanvas : Colors.white,
                 border: Border(
                   top: BorderSide(color: theme.borderDefault, width: 0.8),
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(
+                      alpha: theme.isDark ? 0.25 : 0.05,
+                    ),
+                    blurRadius: 8,
+                    offset: const Offset(0, -2),
+                  ),
+                ],
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Text(
-                    'DeskMate AI • v1.0.0',
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      color: theme.fgMuted.withValues(alpha: 0.8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 38,
+                    child: MouseRegion(
+                      cursor: _isSavingAllSettings
+                          ? SystemMouseCursors.basic
+                          : SystemMouseCursors.click,
+                      child: ElevatedButton.icon(
+                        onPressed: _isSavingAllSettings
+                            ? null
+                            : () => _handleSaveAllSettings(provider, theme),
+                        style: ButtonStyle(
+                          elevation: WidgetStateProperty.resolveWith((states) {
+                            if (states.contains(WidgetState.hovered)) {
+                              return 2.0;
+                            }
+                            return 0.0;
+                          }),
+                          backgroundColor: WidgetStateProperty.resolveWith((
+                            states,
+                          ) {
+                            if (states.contains(WidgetState.disabled)) {
+                              return theme.bgEmphasis;
+                            }
+                            if (states.contains(WidgetState.hovered)) {
+                              return theme.accentHover;
+                            }
+                            if (states.contains(WidgetState.pressed)) {
+                              return AppTheme.purpleActive;
+                            }
+                            return theme.accentEmphasis;
+                          }),
+                          foregroundColor: WidgetStateProperty.all(
+                            Colors.white,
+                          ),
+                          shape: WidgetStateProperty.all(
+                            RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                          ),
+                        ),
+                        icon: _isSavingAllSettings
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.check_rounded, size: 16),
+                        label: Text(
+                          _isSavingAllSettings
+                              ? 'Validating & Saving...'
+                              : 'Save Configuration',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Open Source AI Copilot & Personal Agent',
-                    style: TextStyle(
-                      fontSize: 9.5,
-                      color: theme.fgMuted.withValues(alpha: 0.6),
+                  const SizedBox(height: 12),
+                  Center(
+                    child: Text(
+                      '${AppConstants.appName} • v${AppConstants.version}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: theme.fgMuted.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Center(
+                    child: Text(
+                      'Open Source AI Copilot & Personal Agent',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        color: theme.fgMuted.withValues(alpha: 0.6),
+                      ),
                     ),
                   ),
                 ],
@@ -774,19 +871,26 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  static bool _isGeminiOption(String? m) => m == AppConstants.geminiModelId;
+  static String _modelLabel(String m) =>
+      _isGeminiOption(m) ? AppConstants.geminiModelLabel : m;
+
   Widget _buildAiEngineCard(ChatProvider provider, ThemeData theme) {
     final allModels = List<String>.from(provider.availableLocalModels);
     if (provider.selectedLocalModel.isNotEmpty &&
         !allModels.contains(provider.selectedLocalModel)) {
       allModels.add(provider.selectedLocalModel);
     }
+    if (provider.hasGeminiKey || _geminiKeyController.text.trim().isNotEmpty) {
+      allModels.insert(0, AppConstants.geminiModelId);
+    }
 
     final effectiveModel =
         (_settingsSelectedModel != null &&
             allModels.contains(_settingsSelectedModel))
         ? _settingsSelectedModel
-        : (allModels.contains(provider.selectedLocalModel)
-              ? provider.selectedLocalModel
+        : (allModels.contains(provider.selectedModel)
+              ? provider.selectedModel
               : (allModels.isNotEmpty ? allModels.first : null));
 
     return Container(
@@ -803,49 +907,56 @@ class _ChatScreenState extends State<ChatScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: theme.isDark ? theme.bgSubtle : const Color(0xFFF6F8FA),
+              color: theme.bgPanel,
               borderRadius: BorderRadius.circular(6),
               border: Border.all(color: theme.borderDefault, width: 0.8),
             ),
-            child: Row(
-              children: [
-                Icon(
-                  provider.isUsingGemini
-                      ? Icons.cloud_done_rounded
-                      : Icons.memory_rounded,
-                  size: 14,
-                  color: provider.isUsingGemini
-                      ? theme.accentFg
-                      : (provider.isLocalLlmOnline
-                            ? const Color(0xFF2DA44E)
-                            : theme.dangerFg),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    provider.isUsingGemini
-                        ? 'Active: Gemini 2.5 Flash Cloud'
-                        : (provider.selectedLocalModel.isNotEmpty
-                              ? 'Active: ${provider.selectedLocalModel} (Offline)'
-                              : (provider.isLocalLlmOnline
-                                    ? 'Active: Local Ollama Model'
-                                    : 'Local Ollama: Offline')),
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: theme.fgDefault,
+            child: Builder(
+              builder: (context) {
+                final isUsingLocal =
+                    provider.isLocalLlmOnline &&
+                    provider.selectedLocalModel.isNotEmpty;
+                final isGemini = provider.isUsingGemini;
+                final activeIcon = isGemini
+                    ? Icons.cloud_done_rounded
+                    : Icons.memory_rounded;
+                final activeColor = isGemini
+                    ? theme.accentFg
+                    : (provider.isLocalLlmOnline
+                          ? theme.statusOk
+                          : theme.dangerFg);
+                final activeLabel = isGemini
+                    ? 'Active: ${AppConstants.geminiModelLabel}'
+                    : (isUsingLocal
+                          ? 'Active: ${provider.selectedLocalModel} (Local)'
+                          : (provider.isLocalLlmOnline
+                                ? 'Active: Local Ollama Model'
+                                : 'Local Ollama: Offline'));
+
+                return Row(
+                  children: [
+                    Icon(activeIcon, size: 14, color: activeColor),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        activeLabel,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: theme.fgDefault,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
+                  ],
+                );
+              },
             ),
           ),
           const SizedBox(height: 11),
 
-          // Local Model label
           Text(
-            'Local Model (Ollama)',
+            'AI Model',
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w600,
@@ -891,16 +1002,20 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: Row(
                           children: [
                             Icon(
-                              Icons.memory_rounded,
+                              _isGeminiOption(effectiveModel)
+                                  ? Icons.cloud_outlined
+                                  : Icons.memory_rounded,
                               size: 15,
                               color: effectiveModel != null
-                                  ? const Color(0xFF8250DF)
+                                  ? AppTheme.purplePrimary
                                   : theme.fgMuted,
                             ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                effectiveModel ??
+                                (effectiveModel != null
+                                        ? _modelLabel(effectiveModel)
+                                        : null) ??
                                     (provider.isLocalLlmOnline
                                         ? 'No models detected'
                                         : (provider
@@ -948,13 +1063,13 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: allModels.map((m) {
-                              final isOfflineModel = !provider
-                                  .availableLocalModels
-                                  .contains(m);
+                              final isGeminiItem = _isGeminiOption(m);
+                              final isOfflineModel =
+                                  !isGeminiItem &&
+                                  !provider.availableLocalModels.contains(m);
                               final isSel =
                                   (m ==
-                                  (effectiveModel ??
-                                      provider.selectedLocalModel));
+                                  (effectiveModel ?? provider.selectedModel));
                               return Material(
                                 color: isSel
                                     ? theme.accentFg.withValues(alpha: 0.1)
@@ -978,7 +1093,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                     child: Row(
                                       children: [
                                         Icon(
-                                          Icons.memory_rounded,
+                                          isGeminiItem
+                                              ? Icons.cloud_outlined
+                                              : Icons.memory_rounded,
                                           size: 13,
                                           color: isSel
                                               ? theme.accentFg
@@ -989,7 +1106,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                           child: Text(
                                             isOfflineModel
                                                 ? '$m (Saved / Offline)'
-                                                : m,
+                                                : _modelLabel(m),
                                             overflow: TextOverflow.ellipsis,
                                             style: TextStyle(
                                               fontFamily: 'monospace',
@@ -1206,8 +1323,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 mouseCursor: SystemMouseCursors.click,
                 icon: Icon(
                   _isGoogleClientSecretObscured
-                      ? Icons.visibility_off_outlined
-                      : Icons.visibility_outlined,
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
                   size: 14,
                   color: theme.fgMuted,
                 ),
@@ -1259,20 +1376,20 @@ class _ChatScreenState extends State<ChatScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
-                color: const Color(0xFF2DA44E).withValues(alpha: 0.15),
+                color: theme.statusOk.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: const Color(0xFF2DA44E).withValues(alpha: 0.35),
+                  color: theme.statusOk.withValues(alpha: 0.35),
                   width: 0.8,
                 ),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.check_circle_rounded,
                     size: 11,
-                    color: Color(0xFF2DA44E),
+                    color: theme.statusOk,
                   ),
                   const SizedBox(width: 5),
                   Text(
@@ -1280,13 +1397,16 @@ class _ChatScreenState extends State<ChatScreen> {
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.w600,
-                      color: theme.isDark
-                          ? const Color(0xFF7EE787)
-                          : const Color(0xFF1A7F37),
+                      color: theme.successText,
                     ),
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 10),
+            GoogleConnectButton(
+              onResult: (message, {isError = false}) =>
+                  _showTopNotification(message),
             ),
           ],
         ],
@@ -1294,7 +1414,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildBackendAndSaveCard(ChatProvider provider, ThemeData theme) {
+  Widget _buildBackendCard(ChatProvider provider, ThemeData theme) {
     return Container(
       padding: const EdgeInsets.all(13),
       decoration: BoxDecoration(
@@ -1325,7 +1445,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: provider.isBackendOnline
-                          ? const Color(0xFF2DA44E)
+                          ? theme.statusOk
                           : theme.dangerFg,
                     ),
                   ),
@@ -1336,9 +1456,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       fontSize: 10.5,
                       fontWeight: FontWeight.w600,
                       color: provider.isBackendOnline
-                          ? (theme.isDark
-                                ? const Color(0xFF7EE787)
-                                : const Color(0xFF1A7F37))
+                          ? theme.successText
                           : theme.dangerFg,
                     ),
                   ),
@@ -1355,74 +1473,6 @@ class _ChatScreenState extends State<ChatScreen> {
             prefixIcon: Icons.link,
             isMonospace: true,
           ),
-          const SizedBox(height: 12),
-
-          // Unified Save Button
-          SizedBox(
-            width: double.infinity,
-            height: 38,
-            child: MouseRegion(
-              cursor: _isSavingAllSettings
-                  ? SystemMouseCursors.basic
-                  : SystemMouseCursors.click,
-              child: ElevatedButton.icon(
-                onPressed: _isSavingAllSettings
-                    ? null
-                    : () => _handleSaveAllSettings(provider, theme),
-                style: ButtonStyle(
-                  elevation: WidgetStateProperty.resolveWith((states) {
-                    if (states.contains(WidgetState.hovered)) {
-                      return 2.0;
-                    }
-                    return 0.0;
-                  }),
-                  mouseCursor: WidgetStateProperty.resolveWith((states) {
-                    if (states.contains(WidgetState.disabled)) {
-                      return SystemMouseCursors.basic;
-                    }
-                    return SystemMouseCursors.click;
-                  }),
-                  backgroundColor: WidgetStateProperty.resolveWith((states) {
-                    if (states.contains(WidgetState.disabled)) {
-                      return theme.bgEmphasis;
-                    }
-                    if (states.contains(WidgetState.hovered)) {
-                      return theme.accentHover;
-                    }
-                    if (states.contains(WidgetState.pressed)) {
-                      return AppTheme.purpleActive;
-                    }
-                    return theme.accentEmphasis;
-                  }),
-                  foregroundColor: WidgetStateProperty.all(Colors.white),
-                  shape: WidgetStateProperty.all(
-                    RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
-                ),
-                icon: _isSavingAllSettings
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Icon(Icons.check_rounded, size: 16),
-                label: Text(
-                  _isSavingAllSettings
-                      ? 'Validating & Saving...'
-                      : 'Save Configuration',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -1437,7 +1487,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _isSavingAllSettings = true;
     });
 
-    final modelToSave = _settingsSelectedModel ?? provider.effectiveModel;
+    final modelToSave = _settingsSelectedModel ?? provider.selectedModel;
 
     // 1. Save AI Configuration (Model & Gemini Key)
     await provider.saveAiConfiguration(
@@ -1451,12 +1501,12 @@ class _ChatScreenState extends State<ChatScreen> {
       provider.setBackendUrl(backendUrl);
     }
 
-    // 3. Save Google OAuth Credentials if provided
+    // 3. Save Google OAuth Credentials if provided and changed
     final cid = _googleClientIdController.text.trim();
     final sec = _googleClientSecretController.text.trim();
 
     String? oauthMessage;
-    if (cid.isNotEmpty && sec.isNotEmpty) {
+    if (cid.isNotEmpty && sec.isNotEmpty && !sec.contains('•')) {
       if (!cid.endsWith('.apps.googleusercontent.com') || cid.length < 25) {
         if (mounted) {
           setState(() {
@@ -1479,7 +1529,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final credResult = await provider.saveGoogleCredentials(cid, sec);
       if (credResult['success'] == true) {
-        _googleClientSecretController.clear();
+        _googleClientSecretController.text = sec;
         oauthMessage = 'Google OAuth credentials activated';
       } else {
         if (mounted) {
@@ -1500,8 +1550,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       FocusScope.of(context).unfocus();
       final summary = _formatAiConfigSummary(
-        model: modelToSave,
-        hasGeminiKey: _geminiKeyController.text.isNotEmpty,
+        provider: provider,
         oauthMessage: oauthMessage,
       );
       _showTopNotification(summary);
@@ -1615,18 +1664,63 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  String _getDynamicModelCapability(String modelName) {
+    final lower = modelName.toLowerCase();
+    if (lower.contains('vision') ||
+        lower.contains('llava') ||
+        lower.contains('vl')) {
+      return 'Multimodal Vision & Visual Intelligence';
+    }
+    if (lower.contains('coder') ||
+        lower.contains('code') ||
+        lower.contains('starcoder')) {
+      return 'Optimized for Fast Coding & Development';
+    }
+    if (lower.contains('r1') ||
+        lower.contains('reason') ||
+        lower.contains('deepseek')) {
+      return 'Advanced Step-by-Step Reasoning & Logic';
+    }
+    final paramRegex = RegExp(r':?(\d+(?:\.\d+)?b)\b');
+    final match = paramRegex.firstMatch(lower);
+    if (match != null) {
+      final param = match.group(1)!.toUpperCase();
+      return 'General Intelligence & Reasoning ($param)';
+    }
+    if (lower.contains('llama') ||
+        lower.contains('gpt') ||
+        lower.contains('mistral') ||
+        lower.contains('qwen') ||
+        lower.contains('phi') ||
+        lower.contains('gemma')) {
+      return 'General Purpose Chat & Knowledge Reasoning';
+    }
+    return 'Local Air-Gapped LLM Inference';
+  }
+
   Widget _buildModelSelectionPopup(
     BuildContext context,
     ChatProvider provider,
     ThemeData theme,
   ) {
-    String tempSelected = provider.effectiveModel;
-    final tempGeminiCtrl = TextEditingController(text: provider.geminiApiKey);
-    bool obscureGemini = true;
+    // Seed once per opening; health polling rebuilds this every few seconds.
+    if (!_modelPopupSeeded) {
+      _modelPopupSeeded = true;
+      _popupSelectedModel = provider.selectedModel.isNotEmpty
+          ? provider.selectedModel
+          : provider.effectiveModel;
+      _tempGeminiCtrl.text = provider.geminiApiKey;
+      _popupObscureGemini = true;
+    }
 
     return StatefulBuilder(
       builder: (context, setPopupState) {
-        final hasModels = provider.availableLocalModels.isNotEmpty;
+        final popupOptions = [
+          if (_tempGeminiCtrl.text.trim().isNotEmpty)
+            AppConstants.geminiModelId,
+          ...provider.availableLocalModels,
+        ];
+        final hasModels = popupOptions.isNotEmpty;
         final screenWidth = MediaQuery.of(context).size.width;
 
         return Dialog(
@@ -1687,16 +1781,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           ],
                         ),
                       ),
-                      IconButton(
-                        mouseCursor: SystemMouseCursors.click,
-                        icon: Icon(
-                          Icons.close_rounded,
-                          size: 18,
-                          color: theme.fgMuted,
-                        ),
-                        tooltip: 'Close',
-                        onPressed: () => provider.dismissModelSelectionDialog(),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -1730,14 +1814,14 @@ class _ChatScreenState extends State<ChatScreen> {
                         decoration: BoxDecoration(
                           color:
                               (provider.isLocalLlmOnline
-                                      ? const Color(0xFF2DA44E)
+                                      ? theme.statusOk
                                       : theme.dangerFg)
                                   .withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(4),
                           border: Border.all(
                             color:
                                 (provider.isLocalLlmOnline
-                                        ? const Color(0xFF2DA44E)
+                                        ? theme.statusOk
                                         : theme.dangerFg)
                                     .withValues(alpha: 0.35),
                             width: 0.8,
@@ -1751,9 +1835,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             fontSize: 9.5,
                             fontWeight: FontWeight.w700,
                             color: provider.isLocalLlmOnline
-                                ? (theme.isDark
-                                      ? const Color(0xFF7EE787)
-                                      : const Color(0xFF1A7F37))
+                                ? theme.successText
                                 : theme.dangerFg,
                           ),
                         ),
@@ -1767,10 +1849,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       constraints: const BoxConstraints(maxHeight: 180),
                       child: SingleChildScrollView(
                         child: Column(
-                          children: provider.availableLocalModels.map((
-                            modelName,
-                          ) {
-                            final isSelected = tempSelected == modelName;
+                          children: popupOptions.map((modelName) {
+                            final isSelected = _popupSelectedModel == modelName;
                             return MouseRegion(
                               cursor: SystemMouseCursors.click,
                               child: Container(
@@ -1797,24 +1877,60 @@ class _ChatScreenState extends State<ChatScreen> {
                                     mouseCursor: SystemMouseCursors.click,
                                     value: modelName,
                                     // ignore: deprecated_member_use
-                                    groupValue: tempSelected,
+                                    groupValue: _popupSelectedModel,
                                     dense: true,
                                     activeColor: theme.accentFg,
-                                    title: Text(
-                                      modelName,
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: 12,
-                                        fontWeight: isSelected
-                                            ? FontWeight.w700
-                                            : FontWeight.normal,
-                                        color: theme.fgDefault,
-                                      ),
+                                    title: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            _modelLabel(modelName),
+                                            style: TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 12,
+                                              fontWeight: isSelected
+                                                  ? FontWeight.w700
+                                                  : FontWeight.normal,
+                                              color: theme.fgDefault,
+                                            ),
+                                          ),
+                                        ),
+                                        if (isSelected)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 7,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: theme.accentFg.withValues(
+                                                alpha: 0.12,
+                                              ),
+                                              borderRadius:
+                                                  BorderRadius.circular(4),
+                                              border: Border.all(
+                                                color: theme.accentFg
+                                                    .withValues(alpha: 0.35),
+                                                width: 0.8,
+                                              ),
+                                            ),
+                                            child: Text(
+                                              'SELECTED',
+                                              style: TextStyle(
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w700,
+                                                letterSpacing: 0.5,
+                                                color: theme.accentFg,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
                                     subtitle: Text(
-                                      isSelected
-                                          ? 'Active Model'
-                                          : 'Click to select',
+                                      _isGeminiOption(modelName)
+                                          ? 'Cloud: fast multimodal, needs internet. Chats and files are sent to Google.'
+                                          : _getDynamicModelCapability(
+                                              modelName,
+                                            ),
                                       style: TextStyle(
                                         fontSize: 10.5,
                                         color: isSelected
@@ -1826,7 +1942,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onChanged: (val) {
                                       if (val != null) {
                                         setPopupState(() {
-                                          tempSelected = val;
+                                          _popupSelectedModel = val;
                                         });
                                       }
                                     },
@@ -1840,11 +1956,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ] else ...[
                     Container(
+                      width: double.infinity,
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: theme.isDark
-                            ? const Color(0xFF0D1117)
-                            : const Color(0xFFF6F8FA),
+                        color: theme.bgCode,
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(
                           color: theme.borderDefault,
@@ -1870,26 +1985,62 @@ class _ChatScreenState extends State<ChatScreen> {
                               color: theme.fgMuted,
                             ),
                           ),
-                          const SizedBox(height: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: theme.isDark
-                                  ? Colors.black
-                                  : const Color(0xFFEAEEF2),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              'ollama run llama3.2',
-                              style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 11,
-                                color: theme.isDark
-                                    ? const Color(0xFF7EE787)
-                                    : const Color(0xFF116329),
+                          const SizedBox(height: 8),
+                          Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(5),
+                              mouseCursor: SystemMouseCursors.click,
+                              onTap: () {
+                                Clipboard.setData(
+                                  const ClipboardData(
+                                    text: 'ollama run llama3.2',
+                                  ),
+                                );
+                                _showTopNotification(
+                                  'Copied to clipboard: ollama run llama3.2',
+                                );
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: theme.isDark
+                                      ? Colors.black
+                                      : const Color(0xFFEAEEF2),
+                                  borderRadius: BorderRadius.circular(5),
+                                  border: Border.all(
+                                    color: theme.borderDefault,
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'ollama run llama3.2',
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: theme.isDark
+                                            ? const Color(0xFF7EE787)
+                                            : const Color(0xFF116329),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Tooltip(
+                                      message: 'Copy command',
+                                      child: Icon(
+                                        Icons.copy_rounded,
+                                        size: 13,
+                                        color: theme.fgMuted,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
@@ -1929,8 +2080,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   SizedBox(
                     height: 38,
                     child: TextField(
-                      controller: tempGeminiCtrl,
-                      obscureText: obscureGemini,
+                      controller: _tempGeminiCtrl,
+                      onChanged: (_) => setPopupState(() {}),
+                      obscureText: _popupObscureGemini,
                       style: TextStyle(fontSize: 12.5, color: theme.fgDefault),
                       decoration: InputDecoration(
                         prefixIcon: Icon(
@@ -1941,7 +2093,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         suffixIcon: IconButton(
                           mouseCursor: SystemMouseCursors.click,
                           icon: Icon(
-                            obscureGemini
+                            _popupObscureGemini
                                 ? Icons.visibility_outlined
                                 : Icons.visibility_off_outlined,
                             size: 15,
@@ -1949,7 +2101,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                           onPressed: () {
                             setPopupState(() {
-                              obscureGemini = !obscureGemini;
+                              _popupObscureGemini = !_popupObscureGemini;
                             });
                           },
                         ),
@@ -1991,23 +2143,22 @@ class _ChatScreenState extends State<ChatScreen> {
                             borderRadius: BorderRadius.circular(6),
                           ),
                         ),
-                        child: const Text('Use Defaults / Offline'),
+                        child: Text(
+                          provider.hasConfiguredAi ? 'Cancel' : 'Skip for Now',
+                        ),
                       ),
                       const SizedBox(width: 10),
                       ElevatedButton.icon(
                         onPressed: () async {
-                          final modelToSave = tempSelected.isNotEmpty
-                              ? tempSelected
+                          final modelToSave = _popupSelectedModel.isNotEmpty
+                              ? _popupSelectedModel
                               : provider.effectiveModel;
                           await provider.saveAiConfiguration(
                             model: modelToSave,
-                            geminiApiKey: tempGeminiCtrl.text,
+                            geminiApiKey: _tempGeminiCtrl.text,
                           );
                           _showTopNotification(
-                            _formatAiConfigSummary(
-                              model: modelToSave,
-                              hasGeminiKey: tempGeminiCtrl.text.isNotEmpty,
-                            ),
+                            _formatAiConfigSummary(provider: provider),
                           );
                         },
                         style: ElevatedButton.styleFrom(
@@ -2434,27 +2585,126 @@ class _ChatScreenState extends State<ChatScreen> {
           if (provider.isConnecting)
             Container(
               padding: const EdgeInsets.symmetric(vertical: 12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(theme.accentFg),
-                    ),
+              alignment: Alignment.center,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 11,
+                ),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: theme.isDark
+                        ? const [Color(0xFF0F172A), Color(0xFF1E1B4B)]
+                        : const [Color(0xFFEEF2FF), Color(0xFFFAF5FF)],
                   ),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Initializing local AI service & loading models...',
-                    style: TextStyle(
-                      color: theme.accentFg,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                    ),
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                    color: const Color(
+                      0xFF818CF8,
+                    ).withValues(alpha: theme.isDark ? 0.9 : 0.6),
+                    width: 1.4,
                   ),
-                ],
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppTheme.indigo.withValues(
+                        alpha: theme.isDark ? 0.45 : 0.2,
+                      ),
+                      blurRadius: 20,
+                      spreadRadius: 1,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 26,
+                      height: 26,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: AppTheme.indigo.withValues(alpha: 0.15),
+                      ),
+                      child: const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            AppTheme.indigo,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 13),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'STARTING LOCAL AI ENGINE',
+                              style: TextStyle(
+                                color: theme.isDark
+                                    ? Colors.white
+                                    : const Color(0xFF4F46E5),
+                                fontWeight: FontWeight.w800,
+                                fontSize: 11.5,
+                                letterSpacing: 0.9,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  colors: [AppTheme.indigo, Color(0xFF8B5CF6)],
+                                ),
+                                borderRadius: BorderRadius.circular(10),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: AppTheme.indigo.withValues(
+                                      alpha: 0.35,
+                                    ),
+                                    blurRadius: 6,
+                                  ),
+                                ],
+                              ),
+                              child: Text(
+                                '${provider.initElapsedSeconds}s',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 10,
+                                  letterSpacing: 0.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          provider.engineStatusMessage,
+                          style: TextStyle(
+                            color: theme.isDark
+                                ? const Color(0xFFCBD5E1)
+                                : theme.fgMuted,
+                            fontWeight: FontWeight.w500,
+                            fontSize: 11.5,
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             )
           else if (!provider.isBackendOnline)
@@ -2475,7 +2725,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'AI Service is offline. Please wait or retry connecting.',
+                      provider.isLocalLlmOnline
+                          ? 'Backend service is offline, but Ollama is Online. Connecting to backend...'
+                          : 'AI Service is offline after 3 min timeout. Please restart or view logs.',
                       style: TextStyle(
                         color: theme.attentionFg,
                         fontWeight: FontWeight.w600,
@@ -2498,7 +2750,33 @@ class _ChatScreenState extends State<ChatScreen> {
                           vertical: 6,
                         ),
                       ),
-                      label: const Text('Retry'),
+                      label: Text(
+                        provider.isLocalLlmOnline
+                            ? 'Reconnect'
+                            : 'Restart Engine',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        provider.openEngineLogs();
+                      },
+                      icon: const Icon(Icons.description_outlined, size: 14),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(
+                          color: theme.fgMuted.withValues(alpha: 0.4),
+                          width: 1,
+                        ),
+                        foregroundColor: theme.fgDefault,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                      ),
+                      label: const Text('Logs'),
                     ),
                   ),
                 ],
@@ -2533,21 +2811,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                     ),
-                    Tooltip(
-                      message: 'Cancel editing (Esc)',
-                      child: InkWell(
-                        onTap: _cancelEditing,
-                        borderRadius: BorderRadius.circular(4),
-                        mouseCursor: SystemMouseCursors.click,
-                        child: Padding(
-                          padding: const EdgeInsets.all(2.0),
-                          child: Icon(
-                            Icons.close_rounded,
-                            size: 14,
-                            color: theme.fgMuted,
-                          ),
-                        ),
-                      ),
+                    CircularCloseButton(
+                      size: 15,
+                      tooltip: 'Cancel editing (Esc)',
+                      onTap: _cancelEditing,
                     ),
                   ],
                 ),
@@ -2568,7 +2835,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           ? 'Edit your message...'
                           : (!provider.isLocalLlmOnline &&
                                 !provider.isUsingGemini)
-                          ? 'Please configure your Gemini API Key in Settings to continue...'
+                          ? (provider.isOllamaWithoutModels
+                                ? 'Ollama has no models yet. Run `ollama pull qwen2.5-coder:1.5b`, or add a Gemini API Key in Settings...'
+                                : 'Start Ollama locally or configure Gemini API Key in Settings to continue...')
                           : provider.mode == AgentMode.personal
                           ? 'Ask about Tasks, Drive Docs, Gmail, Calendar...'
                           : 'Ask about your files...',
@@ -2585,68 +2854,75 @@ class _ChatScreenState extends State<ChatScreen> {
                 SizedBox(
                   height: 40,
                   width: 42,
-                  child: MouseRegion(
-                    cursor:
-                        (provider.isSending ||
-                            (!provider.isLocalLlmOnline &&
-                                !provider.isUsingGemini))
-                        ? SystemMouseCursors.basic
-                        : SystemMouseCursors.click,
-                    child: ElevatedButton(
-                      onPressed:
-                          provider.isSending ||
-                              (!provider.isLocalLlmOnline &&
+                  child: Tooltip(
+                    message:
+                        (!provider.isLocalLlmOnline && !provider.isUsingGemini)
+                        ? 'Start Ollama locally or configure Gemini in Settings to send messages'
+                        : (provider.isSending
+                              ? 'Stop waiting for this reply'
+                              : 'Send message (Enter)'),
+                    child: MouseRegion(
+                      cursor:
+                          (!provider.isSending &&
+                              !provider.isLocalLlmOnline &&
+                              !provider.isUsingGemini)
+                          ? SystemMouseCursors.basic
+                          : SystemMouseCursors.click,
+                      child: ElevatedButton(
+                        onPressed: provider.isSending
+                            ? provider.cancelSending
+                            : (!provider.isLocalLlmOnline &&
                                   !provider.isUsingGemini)
-                          ? null
-                          : () => _handleSendMessage(provider),
-                      style: ButtonStyle(
-                        padding: WidgetStateProperty.all(EdgeInsets.zero),
-                        elevation: WidgetStateProperty.resolveWith((states) {
-                          if (states.contains(WidgetState.hovered)) {
-                            return 2.0;
-                          }
-                          return 0.0;
-                        }),
-                        mouseCursor: WidgetStateProperty.resolveWith((states) {
-                          if (states.contains(WidgetState.disabled)) {
-                            return SystemMouseCursors.basic;
-                          }
-                          return SystemMouseCursors.click;
-                        }),
-                        backgroundColor: WidgetStateProperty.resolveWith((
-                          states,
-                        ) {
-                          if (states.contains(WidgetState.disabled)) {
-                            return theme.bgEmphasis;
-                          }
-                          if (states.contains(WidgetState.hovered)) {
-                            return theme.accentHover;
-                          }
-                          if (states.contains(WidgetState.pressed)) {
-                            return AppTheme.purpleActive;
-                          }
-                          return theme.accentEmphasis;
-                        }),
-                        shape: WidgetStateProperty.all(
-                          RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(6),
+                            ? null
+                            : () => _handleSendMessage(provider),
+                        style: ButtonStyle(
+                          padding: WidgetStateProperty.all(EdgeInsets.zero),
+                          elevation: WidgetStateProperty.resolveWith((states) {
+                            if (states.contains(WidgetState.hovered)) {
+                              return 2.0;
+                            }
+                            return 0.0;
+                          }),
+                          mouseCursor: WidgetStateProperty.resolveWith((
+                            states,
+                          ) {
+                            if (states.contains(WidgetState.disabled)) {
+                              return SystemMouseCursors.basic;
+                            }
+                            return SystemMouseCursors.click;
+                          }),
+                          backgroundColor: WidgetStateProperty.resolveWith((
+                            states,
+                          ) {
+                            if (states.contains(WidgetState.disabled)) {
+                              return theme.bgEmphasis;
+                            }
+                            if (states.contains(WidgetState.hovered)) {
+                              return theme.accentHover;
+                            }
+                            if (states.contains(WidgetState.pressed)) {
+                              return AppTheme.purpleActive;
+                            }
+                            return theme.accentEmphasis;
+                          }),
+                          shape: WidgetStateProperty.all(
+                            RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(6),
+                            ),
                           ),
                         ),
-                      ),
-                      child: provider.isSending
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
+                        child: provider.isSending
+                            ? const Icon(
+                                Icons.stop_rounded,
                                 color: Colors.white,
-                                strokeWidth: 2,
+                                size: 20,
+                              )
+                            : const Icon(
+                                Icons.send_rounded,
+                                color: Colors.white,
+                                size: 18,
                               ),
-                            )
-                          : const Icon(
-                              Icons.send_rounded,
-                              color: Colors.white,
-                              size: 18,
-                            ),
+                      ),
                     ),
                   ),
                 ),

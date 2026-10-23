@@ -1,5 +1,8 @@
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
+
+import '../core/constants.dart';
 import '../services/gemini_service.dart';
 
 class ApiService {
@@ -52,7 +55,7 @@ class ApiService {
   /// Helper to perform GET requests with status check and fallback on failure
   Future<Map<String, dynamic>> _getJson(
     String path, {
-    Duration timeout = const Duration(seconds: 5),
+    Duration timeout = AppTimeouts.restShort,
     required Map<String, dynamic> fallback,
   }) async {
     try {
@@ -75,7 +78,7 @@ class ApiService {
     String? geminiApiKey,
     String? model,
   }) async {
-    final url = Uri.parse('$baseUrl/api/personal');
+    final url = Uri.parse('$baseUrl${ApiPaths.personal}');
     final body = _buildChatPayload(
       message: message,
       conversationId: conversationId,
@@ -91,8 +94,15 @@ class ApiService {
         try {
           final gemini = GeminiService(apiKey: geminiApiKey);
           final reply = await gemini.generateContent(message);
-          return {'reply': reply, 'conversation_id': conversationId ?? ''};
-        } catch (_) {}
+          return {
+            'reply':
+                '_DeskMate\'s local engine is offline, so this answer comes from Gemini directly, '
+                'without access to your Gmail, Calendar, Drive or Tasks._\n\n$reply',
+            'conversation_id': conversationId ?? '',
+          };
+        } catch (_) {
+          // Fall through to the backend error below, which says what is actually wrong.
+        }
       }
       throw Exception('Failed to connect to backend: $e');
     }
@@ -105,7 +115,7 @@ class ApiService {
     String? geminiApiKey,
     String? model,
   }) async {
-    final url = Uri.parse('$baseUrl/api/chat');
+    final url = Uri.parse('$baseUrl${ApiPaths.chat}');
     final body = _buildChatPayload(
       message: message,
       conversationId: conversationId,
@@ -121,9 +131,9 @@ class ApiService {
   }
 
   Future<void> resetChat(String conversationId) async {
-    final url = Uri.parse('$baseUrl/api/reset/$conversationId');
+    final url = Uri.parse('$baseUrl${ApiPaths.resetChat(conversationId)}');
     try {
-      await http.post(url).timeout(const Duration(seconds: 5));
+      await http.post(url).timeout(AppTimeouts.restShort);
     } catch (_) {
       // Ignore reset errors in production
     }
@@ -131,8 +141,8 @@ class ApiService {
 
   Future<Map<String, dynamic>> checkHealth() async {
     return _getJson(
-      '/api/health',
-      timeout: const Duration(seconds: 2),
+      ApiPaths.health,
+      timeout: const Duration(seconds: 4),
       fallback: {'status': 'offline', 'local_llm': 'offline'},
     );
   }
@@ -141,8 +151,8 @@ class ApiService {
   Future<List<String>> getAvailableModels() async {
     try {
       final response = await http
-          .get(Uri.parse('$baseUrl/api/models'))
-          .timeout(const Duration(seconds: 5));
+          .get(Uri.parse('$baseUrl${ApiPaths.models}'))
+          .timeout(AppTimeouts.restShort);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final rawModels = data['models'] as List<dynamic>? ?? [];
@@ -157,13 +167,17 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> checkFileHealth() async {
+    return _getJson(ApiPaths.fileHealth, fallback: {'status': 'offline'});
+  }
+
   Future<Map<String, dynamic>> checkPersonalHealth() async {
-    return _getJson('/api/personal/health', fallback: {'status': 'offline'});
+    return _getJson(ApiPaths.personalHealth, fallback: {'status': 'offline'});
   }
 
   Future<Map<String, dynamic>> getGoogleCredentials() async {
     return _getJson(
-      '/api/personal/credentials',
+      ApiPaths.personalCredentials,
       timeout: const Duration(seconds: 6),
       fallback: {'status': 'offline', 'configured': false},
     );
@@ -175,7 +189,7 @@ class ApiService {
   }) async {
     try {
       final body = await _postJson(
-        Uri.parse('$baseUrl/api/personal/credentials'),
+        Uri.parse('$baseUrl${ApiPaths.personalCredentials}'),
         {'client_id': clientId.trim(), 'client_secret': clientSecret.trim()},
         timeout: const Duration(seconds: 10),
       );
@@ -195,10 +209,19 @@ class ApiService {
     }
   }
 
+  /// Opens one Google consent screen (in the browser) for all Google features.
+  Future<Map<String, dynamic>> connectGoogleAccount() {
+    return _postJson(
+      Uri.parse('$baseUrl${ApiPaths.googleConnect}'),
+      {},
+      timeout: AppTimeouts.googleSignIn,
+    );
+  }
+
   /// Fetch SQLite database overview including file path, size, and table summaries
   Future<Map<String, dynamic>> getDatabaseOverview() async {
     return _getJson(
-      '/api/database/overview',
+      ApiPaths.dbOverview,
       timeout: const Duration(seconds: 6),
       fallback: {
         'status': 'offline',
@@ -217,7 +240,7 @@ class ApiService {
     int offset = 0,
   }) async {
     return _getJson(
-      '/api/database/table/$tableName?limit=$limit&offset=$offset',
+      '${ApiPaths.dbTable(tableName)}?limit=$limit&offset=$offset',
       timeout: const Duration(seconds: 8),
       fallback: {
         'status': 'error',
@@ -232,9 +255,9 @@ class ApiService {
   /// Execute a custom safe read-only SQL SELECT query
   Future<Map<String, dynamic>> executeDatabaseQuery(String query) async {
     try {
-      final body = await _postJson(Uri.parse('$baseUrl/api/database/query'), {
+      final body = await _postJson(Uri.parse('$baseUrl${ApiPaths.dbQuery}'), {
         'query': query.trim(),
-      }, timeout: const Duration(seconds: 15));
+      }, timeout: AppTimeouts.restMedium);
       return body;
     } catch (e) {
       final errStr = e.toString().replaceFirst('Exception: ', '');
@@ -245,6 +268,155 @@ class ApiService {
         'count': 0,
         'error': errStr.isNotEmpty ? errStr : 'Failed to execute query.',
       };
+    }
+  }
+
+  // --- Meeting Intelligence Endpoints ---
+
+  Future<Map<String, dynamic>> startMeeting({
+    int monitor = 1,
+    double fps = 2.0,
+    bool allowLightweightMode = false,
+    bool startMuted = false,
+    String? geminiApiKey,
+  }) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingStart}');
+    return _postJson(url, {
+      'monitor': monitor,
+      'fps': fps,
+      'allow_lightweight_mode': allowLightweightMode,
+      'start_muted': startMuted,
+      if (geminiApiKey != null && geminiApiKey.isNotEmpty)
+        'gemini_api_key': geminiApiKey,
+    });
+  }
+
+  Future<Map<String, dynamic>> stopMeeting() async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingStop}');
+    return _postJson(url, {});
+  }
+
+  Future<Map<String, dynamic>> setMeetingMicMuted(bool muted) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingMute}');
+    return _postJson(url, {'muted': muted});
+  }
+
+  /// Returns `state: 'unreachable'` when the backend doesn't answer, so a slow
+  /// poll is never mistaken for the meeting having stopped.
+  Future<Map<String, dynamic>> getMeetingStatus() async {
+    return _getJson(
+      ApiPaths.meetingStatus,
+      timeout: AppTimeouts.restShort,
+      fallback: {'state': 'unreachable'},
+    );
+  }
+
+  Future<Map<String, dynamic>> summarizeMeeting({
+    String? sessionId,
+    List<Map<String, String>>? customFields,
+    String? geminiApiKey,
+  }) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingSummarize}');
+    final payload = <String, dynamic>{
+      'session_id': sessionId,
+      if (customFields != null && customFields.isNotEmpty)
+        'custom_fields': customFields,
+      if (geminiApiKey != null && geminiApiKey.isNotEmpty)
+        'gemini_api_key': geminiApiKey,
+    };
+    return _postJson(url, payload, timeout: AppTimeouts.meetingSummarize);
+  }
+
+  Future<Map<String, dynamic>> syncMeetingTasks({
+    required String sessionId,
+    required List<String> actionItems,
+  }) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingSyncTasks}');
+    return _postJson(url, {
+      'session_id': sessionId,
+      'action_items': actionItems,
+    });
+  }
+
+  String getMeetingPdfUrl(String sessionId) {
+    return '$baseUrl${ApiPaths.meetingPdf(sessionId)}';
+  }
+
+  String getMeetingAssetUrl(String sessionId, String filename) {
+    return '$baseUrl${ApiPaths.meetingAsset(sessionId, filename)}';
+  }
+
+  Future<Map<String, dynamic>> exportMeetingToDrive({
+    required String sessionId,
+    String folderName = 'DeskMate Meetings',
+  }) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingExportDrive}');
+    return _postJson(url, {'session_id': sessionId, 'folder_name': folderName});
+  }
+
+  Future<Map<String, dynamic>> sendMeetingEmail({
+    required String sessionId,
+    required String toEmail,
+    String? subject,
+    String? ccEmail,
+    String? userName,
+    String? designation,
+    String? senderEmail,
+    String? pdfName,
+  }) async {
+    final url = Uri.parse('$baseUrl${ApiPaths.meetingSendEmail}');
+    return _postJson(url, {
+      'session_id': sessionId,
+      'to_email': toEmail,
+      if (subject != null && subject.trim().isNotEmpty)
+        'subject': subject.trim(),
+      if (ccEmail != null && ccEmail.trim().isNotEmpty)
+        'cc_email': ccEmail.trim(),
+      if (userName != null && userName.trim().isNotEmpty)
+        'user_name': userName.trim(),
+      if (designation != null && designation.trim().isNotEmpty)
+        'designation': designation.trim(),
+      if (senderEmail != null && senderEmail.trim().isNotEmpty)
+        'sender_email': senderEmail.trim(),
+      if (pdfName != null && pdfName.trim().isNotEmpty)
+        'pdf_name': pdfName.trim(),
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getMeetingSessions() async {
+    final res = await _getJson(
+      ApiPaths.meetingSessions,
+      timeout: const Duration(seconds: 4),
+      fallback: {'status': 'ok', 'sessions': []},
+    );
+    final list = res['sessions'];
+    if (list is List) {
+      return list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  Future<Map<String, dynamic>?> getMeetingSessionReport(
+    String sessionId,
+  ) async {
+    final res = await _getJson(
+      ApiPaths.meetingSession(sessionId),
+      timeout: const Duration(seconds: 6),
+      fallback: {'status': 'error'},
+    );
+    if (res['status'] == 'ok' && res['session'] is Map) {
+      return Map<String, dynamic>.from(res['session'] as Map);
+    }
+    return null;
+  }
+
+  Future<bool> deleteMeetingSession(String sessionId) async {
+    try {
+      final url = Uri.parse('$baseUrl${ApiPaths.meetingSession(sessionId)}');
+      final resp = await http.delete(url).timeout(const Duration(seconds: 5));
+      return resp.statusCode >= 200 && resp.statusCode < 300;
+    } catch (_) {
+      return false;
     }
   }
 }
